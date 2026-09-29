@@ -5,13 +5,31 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+myenv/
+mayenv/
 *.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Node
 node_modules/
 dist/
 .env
 .env.local
+.env.*
+!.env.example
+*.tsbuildinfo
+
+# Local runtime data, credentials and generated artifacts
+WinSecAgent/backend/data/*
+!WinSecAgent/backend/data/models.example.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+outputs/
 
 # IDE
 .vscode/

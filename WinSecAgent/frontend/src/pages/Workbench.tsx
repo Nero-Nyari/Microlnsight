@@ -14,7 +14,7 @@ import MemoryPanel from '../components/MemoryPanel';
 import SystemInfoPanel from '../components/SystemInfoPanel';
 import SchedulerPanel from '../components/SchedulerPanel';
 import ModelManager from '../components/ModelManager';
-import { api } from '../services/api';
+import NewAlertDialog from '../components/NewAlertDialog';
 
 const RIGHT_TABS = [
   { key: 'agents', label: '智能体执行' },
@@ -39,7 +39,6 @@ export default function Workbench() {
   const [activeRightTab, setActiveRightTab] = useState<RightTabKey>('agents');
   const [activeLeftTab, setActiveLeftTab] = useState<LeftTabKey>('logs');
   const [showNewAlert, setShowNewAlert] = useState(false);
-  const [newAlertText, setNewAlertText] = useState('');
   const [showModelManager, setShowModelManager] = useState(false);
 
   const {
@@ -47,7 +46,6 @@ export default function Workbench() {
     loading,
     refreshAlerts,
     refreshIncidents,
-    selectIncident,
     runAnalysis,
   } = useAppStore();
 
@@ -56,31 +54,13 @@ export default function Workbench() {
     refreshIncidents();
   }, [refreshAlerts, refreshIncidents]);
 
-  const handleCreateAlert = async () => {
-    if (!newAlertText.trim()) return;
-    await useAppStore.getState().refreshAlerts();
-    const alert = await api.alerts.create({
-      title: newAlertText.split('\n')[0].slice(0, 80) || '手动告警',
-      raw_content: newAlertText,
-      source_type: 'manual',
-      severity: 'medium',
-      status: 'pending',
-    });
-    await refreshAlerts();
-    const incident = await api.incidents.create({ alert_id: alert.id, status: 'pending' });
-    await refreshIncidents();
-    await selectIncident(incident.id);
-    setShowNewAlert(false);
-    setNewAlertText('');
-  };
-
   return (
     <div className="h-screen flex flex-col bg-slate-50">
-      <header className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-4 shrink-0">
+      <header className="min-h-14 py-2 gap-2 flex-wrap bg-white border-b border-slate-200 flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-2">
           <Shield className="w-6 h-6 text-primary-600" />
           <h1 className="font-bold text-lg text-slate-800">WinSecAgent</h1>
-          <span className="text-xs text-slate-400 ml-2">AI-Powered Windows Security Agent</span>
+          <span className="hidden sm:inline text-xs text-slate-400 ml-2">Windows 安全事件工作台</span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -95,14 +75,14 @@ export default function Workbench() {
             className="flex items-center gap-1 bg-primary-600 hover:bg-primary-700 text-white text-sm px-3 py-1.5 rounded-md transition"
           >
             <Plus className="w-4 h-4" />
-            新建告警
+            导入日志
           </button>
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-[280px_260px_minmax(320px,1fr)_400px] overflow-auto">
         {/* Left panel - WinSecAgent features */}
-        <aside className="w-80 bg-white border-r border-slate-200 flex flex-col shrink-0">
+        <aside id="local-log-panel" className="h-96 2xl:h-auto min-h-0 bg-white border-r border-slate-200 flex flex-col shrink-0">
           <div className="flex border-b border-slate-200 overflow-x-auto">
             {LEFT_TABS.map((t) => (
               <button key={t.key} onClick={() => setActiveLeftTab(t.key)}
@@ -125,16 +105,16 @@ export default function Workbench() {
         </aside>
 
         {/* Center - Alert queue + detail */}
-        <div className="w-72 bg-white border-r border-slate-200 flex flex-col shrink-0">
+        <div className="h-96 2xl:h-auto min-h-0 bg-white border-r border-slate-200 flex flex-col shrink-0">
           <AlertList />
         </div>
 
-        <main className="flex-1 flex flex-col min-w-0 bg-white">
+        <main className="h-[34rem] 2xl:h-auto min-h-0 flex flex-col min-w-0 bg-white">
           <AlertDetail onAnalyze={(id) => runAnalysis(id)} />
         </main>
 
         {/* Right panel - SecAgentX features */}
-        <aside className="w-[26rem] bg-white border-l border-slate-200 flex flex-col shrink-0">
+        <aside className="h-[34rem] 2xl:h-auto min-h-0 bg-white border-l border-slate-200 flex flex-col shrink-0">
           <div className="flex border-b border-slate-200 overflow-x-auto">
             {RIGHT_TABS.map((t) => (
               <button key={t.key} onClick={() => setActiveRightTab(t.key)}
@@ -170,31 +150,11 @@ export default function Workbench() {
         </aside>
       </div>
 
-      {showNewAlert && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-[600px] max-w-[90vw] flex flex-col max-h-[80vh]">
-            <div className="px-4 py-3 border-b border-slate-200 font-semibold">新建告警</div>
-            <div className="p-4 flex-1">
-              <textarea
-                className="w-full h-48 border border-slate-300 rounded-md p-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
-                placeholder="粘贴告警日志或描述..."
-                value={newAlertText}
-                onChange={(e) => setNewAlertText(e.target.value)}
-              />
-            </div>
-            <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
-              <button onClick={() => setShowNewAlert(false)}
-                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 rounded-md">
-                取消
-              </button>
-              <button onClick={handleCreateAlert}
-                className="px-3 py-1.5 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700">
-                创建
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showNewAlert && <NewAlertDialog onClose={() => setShowNewAlert(false)} onReadLocal={() => {
+        setShowNewAlert(false);
+        setActiveLeftTab('logs');
+        document.getElementById('local-log-panel')?.scrollIntoView({ behavior: 'smooth' });
+      }} />}
 
       <ModelManager open={showModelManager} onClose={() => setShowModelManager(false)} />
     </div>

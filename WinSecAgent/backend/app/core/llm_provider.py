@@ -117,8 +117,12 @@ class DeepSeekProvider(BaseLLMProvider):
             "stream": False,
         }
         if model == "deepseek-v4-pro":
-            params["extra_body"] = {"thinking": {"type": "enabled"}}
-            params["reasoning_effort"] = "high"
+            # Short JSON stages need their token budget for the actual answer.
+            # Otherwise reasoning can consume it and leave an empty content field.
+            thinking = kwargs.get("max_tokens", 2048) > 2048
+            params["extra_body"] = {"thinking": {"type": "enabled" if thinking else "disabled"}}
+            if thinking:
+                params["reasoning_effort"] = "high"
         try:
             response = self.client.chat.completions.create(**params)
         except TypeError as te:
@@ -128,7 +132,10 @@ class DeepSeekProvider(BaseLLMProvider):
                 response = self.client.chat.completions.create(**params)
             else:
                 raise
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise LLMError("模型未返回正文，请检查模型参数或输出预算")
+        return content
 
 
 class OllamaProvider(BaseLLMProvider):

@@ -4,15 +4,19 @@ import { useAppStore } from '../stores/appStore';
 import { api } from '../services/api';
 
 export default function ReportView() {
-  const { selectedIncident, report, refreshIncidentDetail } = useAppStore();
+  const { selectedIncident, report, refreshIncidentDetail, loading } = useAppStore();
   const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
 
   const handleGenerate = async () => {
-    if (!selectedIncident) return;
+    if (!selectedIncident || loading || generating) return;
     setGenerating(true);
+    setError('');
     try {
       await api.reports.generate(selectedIncident.id);
       await refreshIncidentDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '报告生成失败');
     } finally {
       setGenerating(false);
     }
@@ -20,26 +24,21 @@ export default function ReportView() {
 
   const handleDownload = () => {
     if (!report) return;
-    const blob = new Blob([report.content], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `report-${report.id}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
+    window.location.assign(`/api/reports/${report.id}/download`);
   };
 
   return (
     <div className="flex flex-col h-full">
+      {error && <p role="alert" className="text-xs text-red-600 mb-2">{error}</p>}
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs font-semibold text-slate-600 flex items-center gap-1">
           <FileText className="w-3.5 h-3.5" />
-          安全事件报告
+          日志分析报告
         </div>
         <div className="flex gap-1">
           <button
             onClick={handleGenerate}
-            disabled={generating}
+            disabled={generating || loading}
             className="flex items-center gap-1 text-[10px] bg-primary-600 hover:bg-primary-700 text-white px-2 py-1 rounded disabled:opacity-50"
           >
             <RefreshCw className={`w-3 h-3 ${generating ? 'animate-spin' : ''}`} />
@@ -63,6 +62,7 @@ export default function ReportView() {
           <div>报告尚未生成</div>
           <button
             onClick={handleGenerate}
+            disabled={generating || loading}
             className="mt-2 text-xs text-primary-600 hover:underline"
           >
             立即生成

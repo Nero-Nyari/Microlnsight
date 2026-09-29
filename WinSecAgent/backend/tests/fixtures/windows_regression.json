@@ -1,0 +1,572 @@
+[
+  {
+    "id": "normal_maintenance",
+    "description": "正常运维清单查询，不应仅凭 PowerShell 判异常",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Microsoft-Windows-PowerShell/Operational",
+        "EventID": 4104,
+        "RecordId": 1,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "ScriptBlockText": "Get-Service | Select-Object Name, Status"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "codex_inventory",
+    "description": "合成 Codex 开发操作；工具名不作为恶意或白名单依据",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Microsoft-Windows-PowerShell/Operational",
+        "EventID": 4104,
+        "RecordId": 2,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "ScriptBlockText": "Get-Process; Get-Content README.md",
+          "Tool": "Codex"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "single_failed_logon",
+    "description": "一次输错密码不足以认定密码猜测",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 3,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "normal_service",
+    "description": "已知安装位置的新服务仍需授权证据，不能自动认定恶意",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "System",
+        "EventID": 7045,
+        "RecordId": 200,
+        "TimeCreated": "2026-09-29T10:06:00Z",
+        "EventData": {
+          "ServiceName": "LabUpdater",
+          "ImagePath": "C:\\Program Files\\Lab\\updater.exe",
+          "StartType": "2"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "suspicious_service",
+    "description": "自动服务位于 Public；名称含 Codex 也不豁免",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4697,
+        "RecordId": 201,
+        "TimeCreated": "2026-09-29T10:06:00Z",
+        "EventData": {
+          "ServiceName": "CodexHelper",
+          "ServiceFileName": "C:\\Users\\Public\\helper.exe",
+          "ServiceStartType": "2"
+        }
+      }
+    ],
+    "queue": "alerts",
+    "rules": [
+      "service_writable_path"
+    ]
+  },
+  {
+    "id": "repeated_failures",
+    "description": "5分钟内5条独立4625",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 101,
+        "TimeCreated": "2026-09-29T10:01:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 102,
+        "TimeCreated": "2026-09-29T10:02:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 103,
+        "TimeCreated": "2026-09-29T10:03:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 104,
+        "TimeCreated": "2026-09-29T10:04:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      }
+    ],
+    "queue": "alerts",
+    "rules": [
+      "repeated_failed_logon"
+    ],
+    "failure_count": 5
+  },
+  {
+    "id": "failure_success_service",
+    "description": "失败集中出现后成功登录及同主机服务，仅认定时间关联",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 101,
+        "TimeCreated": "2026-09-29T10:01:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 102,
+        "TimeCreated": "2026-09-29T10:02:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 103,
+        "TimeCreated": "2026-09-29T10:03:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 104,
+        "TimeCreated": "2026-09-29T10:04:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4624,
+        "RecordId": 150,
+        "TimeCreated": "2026-09-29T10:05:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "System",
+        "EventID": 7045,
+        "RecordId": 200,
+        "TimeCreated": "2026-09-29T10:06:00Z",
+        "EventData": {
+          "ServiceName": "LabUpdater",
+          "ImagePath": "C:\\Program Files\\Lab\\updater.exe",
+          "StartType": "2"
+        }
+      }
+    ],
+    "queue": "alerts",
+    "rules": [
+      "repeated_failed_logon",
+      "failure_success_service"
+    ],
+    "failure_count": 5
+  },
+  {
+    "id": "duplicate_imports",
+    "description": "同一条失败日志重复导入不能凑成密码猜测",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 100,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "text_claim_not_count",
+    "description": "消息声称120次失败不等于120条证据",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 300,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "IpAddress": "192.0.2.10"
+        },
+        "Message": "连续120次失败登录，攻击者已入侵"
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  },
+  {
+    "id": "spread_over_time",
+    "description": "每10分钟一次失败不满足5分钟阈值",
+    "events": [
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 400,
+        "TimeCreated": "2026-09-29T10:00:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 401,
+        "TimeCreated": "2026-09-29T10:10:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 402,
+        "TimeCreated": "2026-09-29T10:20:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 403,
+        "TimeCreated": "2026-09-29T10:30:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      },
+      {
+        "Platform": "Windows",
+        "IsDemo": true,
+        "Computer": "WIN-REGRESSION",
+        "Channel": "Security",
+        "EventID": 4625,
+        "RecordId": 404,
+        "TimeCreated": "2026-09-29T10:40:00Z",
+        "EventData": {
+          "TargetUserName": "lab_user",
+          "TargetDomainName": "LAB",
+          "IpAddress": "192.0.2.10",
+          "LogonType": "3",
+          "TargetLogonId": "0x123"
+        }
+      }
+    ],
+    "queue": "logs",
+    "rules": []
+  }
+]

@@ -15,4 +15,5 @@ def list_evidence(incident_id: int, db: Session = Depends(get_db)):
     incident = db.query(models.Incident).filter(models.Incident.id == incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="事件未找到")
-    return db.query(models.EvidenceItem).filter(models.EvidenceItem.incident_id == incident_id).all()
+    from app.services.analysis_view import incident_detail
+    return incident_detail(incident)['evidence_items']

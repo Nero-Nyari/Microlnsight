@@ -4,19 +4,26 @@ import { useAppStore } from '../stores/appStore';
 export default function AttackChain() {
   const { selectedIncident, agentRuns } = useAppStore();
 
-  const chainRun = agentRuns.find((r) => r.agent_name === 'Attack Chain');
+  const chainRun = [...agentRuns].reverse().find((r) => r.agent_name === 'Attack Chain');
   const stages = chainRun?.output_data?.stages || [];
   const path = chainRun?.output_data?.attack_path || selectedIncident?.attack_stage || '未知';
   const suspicious = chainRun?.output_data?.suspicious_success || '未知';
 
+  if (selectedIncident?.correlation) {
+    return <div className="text-xs space-y-2"><p className="font-semibold">本地事件时间关联</p>{selectedIncident.correlation.findings.map((f,i)=><p key={i}>{f.title}</p>)}<p className="text-slate-500">时间相邻不等于因果关系，尚未确认攻击成功。请在结果页查看对应记录与待补证项。</p></div>;
+  }
+
   if (!chainRun) {
     return <div className="text-xs text-slate-400 text-center py-4">攻击链尚未分析</div>;
+  }
+  if (selectedIncident?.queue !== 'alerts') {
+    return <div className="text-xs bg-slate-50 border rounded p-3 space-y-2"><p className="font-semibold">{selectedIncident?.assessment?.classification === 'benign' ? '正常活动：不建立攻击链' : '证据不足：暂不建立攻击链'}</p><p>{path}</p><p className="text-slate-500">仅覆盖已提供日志，不代表整台主机安全。旧分析中的攻击推断不作为当前结论。</p></div>;
   }
 
   return (
     <div className="space-y-3">
       <div className="bg-slate-50 border border-slate-200 rounded-md p-3">
-        <div className="text-[10px] text-slate-400 uppercase mb-1">攻击路径</div>
+        <div className="text-[10px] text-slate-400 uppercase mb-1">可能的攻击路径（待核实）</div>
         <div className="text-xs font-medium text-slate-700 flex items-center flex-wrap gap-1">
           {path.split(' -> ').map((stage: string, i: number, arr: string[]) => (
             <span key={i} className="flex items-center gap-1">
@@ -30,7 +37,7 @@ export default function AttackChain() {
       <div className="bg-orange-50 border border-orange-200 rounded-md p-3 flex gap-2">
         <Target className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
         <div>
-          <div className="text-[10px] text-orange-600 font-semibold uppercase">最可疑成功点</div>
+          <div className="text-[10px] text-orange-600 font-semibold uppercase">证据边界</div>
           <div className="text-xs text-orange-800 mt-0.5">{suspicious}</div>
         </div>
       </div>

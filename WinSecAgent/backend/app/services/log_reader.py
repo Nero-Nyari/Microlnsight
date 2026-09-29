@@ -1,18 +1,20 @@
 """Windows 事件日志读取器.
 
 通过 pywin32 读取本地 Windows 事件日志中的安全/系统/应用/Defender 日志。
-在非 Windows 平台或 pywin32 不可用时，回退到合成演示数据。
+非 Windows 平台使用明确标记的演示数据；Windows 读取失败不生成假数据。
 """
 from __future__ import annotations
 
 import json
 import platform
 import random
+from xml.etree import ElementTree
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 # ---------- suspicious event IDs ----------
 SUSPICIOUS_IDS = {
+    4104,  # PowerShell script block
     4625,  # failed logon
     4648,  # explicit credentials logon
     4740,  # account locked out
@@ -28,7 +30,7 @@ SUSPICIOUS_IDS = {
     5156,  # Windows Filtering Platform connection
 }
 
-CHANNELS = ["Security", "System", "Application"]
+CHANNELS = ["Security", "System", "Application", "Microsoft-Windows-Windows Defender/Operational", "Microsoft-Windows-PowerShell/Operational"]
 
 # ---------- Mock data generation ----------
 
@@ -76,45 +78,103 @@ def _filter_suspicious(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ---------- Real Windows reading ----------
 
-def _read_real_logs(channels: Optional[List[str]] = None, max_events: int = 200) -> List[Dict[str, Any]]:
-    """Read real Windows Event Log via pywin32."""
+def _error_code(exc):
+    code = getattr(exc, "winerror", None)
+    if code is None and exc.args and isinstance(exc.args[0], int):
+        code = exc.args[0]
+    return code
+
+
+def _channel_error(channel, exc):
+    code = _error_code(exc)
+    if code == 5:
+        kind, message = "access_denied", f"{channel} 日志读取权限不足。"
+    elif code == 15007:
+        kind, message = "channel_not_found", f"{channel} 通道不存在，请检查通道名称或系统组件。"
+    else:
+        kind, message = "read_error", f"{channel} 未完整读取，请展开查看详情。"
+    return {"error_kind": kind, "error_code": code, "message": message, "detail": str(exc)}
+
+
+def _reader_context():
+    """Inspect the backend process token without enabling privileges."""
+    context = {"account": None, "elevated": None}
+    token = None
     try:
-        import win32evtlog  # type: ignore
-        import win32evtlogutil  # type: ignore
+        import win32api
+        import win32security
+        token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), 8)  # TOKEN_QUERY
+        sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        name, domain, _ = win32security.LookupAccountSid(None, sid)
+        context["account"] = f"{domain}\\{name}" if domain else name
+        context["elevated"] = bool(win32security.GetTokenInformation(token, win32security.TokenElevation))
+    except Exception:
+        pass  # Unknown diagnostics must not prevent reading.
+    finally:
+        if token is not None:
+            token.Close()
+    return context
+
+
+def _read_real_logs(channels=None, max_events=200):
+    results = []
+    channels = list(dict.fromkeys(channels or CHANNELS))
+    try:
+        import win32evtlog
     except ImportError:
-        return _generate_mock_events(max_events)
-
-    channels = channels or CHANNELS
-    all_events: List[Dict[str, Any]] = []
-
+        return [], [{"channel": channel, "status": "failed", "events_read": 0,
+                     "error_kind": "dependency_missing", "error_code": None,
+                     "message": "未安装 pywin32，无法读取 Windows 日志。未生成模拟数据。"}
+                    for channel in channels]
+    events = []
     for channel in channels:
+        query = None
+        count = 0
+        result = {"channel": channel, "status": "success", "events_read": 0}
         try:
-            hand = win32evtlog.OpenEventLog(None, channel)
-            flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-            total = 0
-            while total < max_events:
-                batch = win32evtlog.ReadEventLog(hand, flags, 0)
+            query = win32evtlog.EvtQuery(channel, win32evtlog.EvtQueryReverseDirection, "*")
+            while count < max_events:
+                try:
+                    batch = win32evtlog.EvtNext(query, min(32, max_events - count))
+                except Exception as exc:
+                    if _error_code(exc) == 259:  # ERROR_NO_MORE_ITEMS is normal EOF.
+                        break
+                    raise
                 if not batch:
                     break
-                for evt in batch:
-                    if total >= max_events:
-                        break
-                    event_dict = {
-                        "TimeCreated": evt.TimeGenerated.Format("%Y-%m-%d %H:%M:%S"),
-                        "EventID": evt.EventID & 0xFFFF,
-                        "Level": evt.EventType,
-                        "Channel": channel,
-                        "ProviderName": evt.SourceName,
-                        "RecordId": evt.RecordNumber,
-                        "Message": win32evtlogutil.SafeFormatMessage(evt, channel) if evt.StringInserts else "",
-                    }
-                    all_events.append(event_dict)
-                    total += 1
-            win32evtlog.CloseEventLog(hand)
-        except Exception:
-            continue
-
-    return all_events
+                try:
+                    for event in batch:
+                        root = ElementTree.fromstring(win32evtlog.EvtRender(event, win32evtlog.EvtRenderEventXml))
+                        ns = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
+                        system = root.find("e:System", ns)
+                        def text(name):
+                            return system.findtext("e:" + name, default="", namespaces=ns)
+                        data = {item.get("Name", str(i)): item.text or "" for i, item in enumerate(root.findall("e:EventData/e:Data", ns))}
+                        provider = system.find("e:Provider", ns)
+                        timestamp = system.find("e:TimeCreated", ns)
+                        message = root.findtext("e:RenderingInfo/e:Message", default="", namespaces=ns)
+                        if not message:
+                            message = json.dumps(data, ensure_ascii=False) if data else "事件未提供格式化消息，请核对原始 XML。"
+                        events.append({"TimeCreated": timestamp.get("SystemTime", "") if timestamp is not None else "",
+                            "EventID": int(text("EventID")), "Level": int(text("Level") or 4),
+                            "Channel": text("Channel") or channel, "Computer": text("Computer"),
+                            "ProviderName": provider.get("Name", "") if provider is not None else "",
+                            "RecordId": int(text("EventRecordID") or 0), "Message": message, "EventData": data,
+                            "OriginalXml": ElementTree.tostring(root, encoding="unicode")})
+                        count += 1
+                finally:
+                    # Also close remaining handles if rendering one event failed.
+                    for event in batch:
+                        event.Close()
+        except Exception as exc:
+            result.update(_channel_error(channel, exc))
+            result["status"] = "partial" if count else "failed"
+        finally:
+            if query is not None:
+                query.Close()
+        result["events_read"] = count
+        results.append(result)
+    return events, results
 
 
 # ---------- Public API ----------
@@ -130,12 +190,20 @@ def read_windows_logs(
     """
     is_windows = platform.system() == "Windows"
 
+    channel_results = []
+    reader_context = None
     if is_windows:
-        raw_events = _read_real_logs(channels, max_events)
+        raw_events, channel_results = _read_real_logs(channels, max_events)
+        reader_context = _reader_context()
         is_mock = False
     else:
         raw_events = _generate_mock_events(max_events)
         is_mock = True
+
+    warnings = [r["message"] for r in channel_results if r["status"] != "success"]
+    read_status = "demo" if is_mock else "success"
+    if warnings:
+        read_status = "partial" if raw_events or any(r["status"] == "success" for r in channel_results) else "failed"
 
     if suspicious_only:
         events = _filter_suspicious(raw_events)
@@ -153,6 +221,10 @@ def read_windows_logs(
 
     return {
         "events": events,
+        "warnings": warnings,
+        "read_status": read_status,
+        "channel_results": channel_results,
+        "reader_context": reader_context,
         "total_raw": len(raw_events),
         "total_filtered": len(events),
         "event_id_stats": id_counts,

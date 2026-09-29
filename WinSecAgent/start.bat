@@ -9,7 +9,12 @@ echo.
 cd /d "%~dp0"
 
 echo [1/2] Starting backend...
-start "WinSecAgent-Backend" cmd /k "myenv\Scripts\activate.bat && cd backend && python run.py"
+set "BACKEND_PYTHON=python"
+if exist "backend\myenv\Scripts\python.exe" (
+    backend\myenv\Scripts\python.exe -c "import fastapi, uvicorn, sqlalchemy" >nul 2>&1
+    if not errorlevel 1 set "BACKEND_PYTHON=myenv\Scripts\python.exe"
+)
+start "WinSecAgent-Backend" cmd /k "cd backend && %BACKEND_PYTHON% run.py"
 
 echo [Info] Waiting for backend to start (8s)...
 timeout /t 8 /nobreak >nul

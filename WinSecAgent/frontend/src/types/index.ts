@@ -10,6 +10,16 @@ export interface Alert {
 }
 
 export interface Incident {
+  source_record?: EvidenceRecord | null;
+  correlation?: CorrelationResult | null;
+  queue: 'logs' | 'alerts';
+  assessment?: {
+    classification: 'benign' | 'unknown' | 'suspicious' | 'malicious';
+    label: string;
+    queue: 'logs' | 'alerts';
+    findings: {quote: string; reason: string}[];
+    missing_evidence: string[];
+  };
   id: number;
   alert_id: number;
   event_type?: string;
@@ -37,6 +47,38 @@ export interface AgentRun {
   error_message?: string;
   started_at: string;
   finished_at?: string;
+}
+
+export interface EvidenceRecord {
+  alert_id: number;
+  incident_id?: number | null;
+  event_id?: string | null;
+  record_id?: string | number | null;
+  timestamp?: string | null;
+  computer?: string | null;
+  channel?: string | null;
+  username?: string | null;
+  account_domain?: string | null;
+  source_ip?: string | null;
+  service_path?: string | null;
+  is_demo: boolean;
+  raw_content: string;
+  raw_sha256: string;
+}
+
+export interface CorrelationResult {
+  rule_version: number;
+  analyzed_at: string;
+  window_minutes: number;
+  warnings: string[];
+  recommendations: string[];
+  records: EvidenceRecord[];
+  time_range: {start: string | null; end: string | null};
+  findings: {
+    rule_id: string; title: string; reason: string; record_refs: number[];
+    failure_count?: number; start?: string | null; end?: string | null;
+    source_ip?: string; account?: string; missing_evidence: string[];
+  }[];
 }
 
 export interface EvidenceItem {
@@ -81,6 +123,9 @@ export interface DemoCase {
 
 // WinSecAgent new types
 export interface LogEvent {
+  Computer?: string;
+  EventData?: Record<string, unknown>;
+  OriginalXml?: string;
   TimeCreated: string;
   EventID: number;
   Level: number;
@@ -91,6 +136,18 @@ export interface LogEvent {
 }
 
 export interface LogReadResult {
+  warnings?: string[];
+  read_status?: 'success' | 'partial' | 'failed' | 'demo';
+  channel_results?: {
+    channel: string;
+    status: 'success' | 'partial' | 'failed';
+    events_read: number;
+    error_kind?: string | null;
+    error_code?: number | null;
+    message?: string | null;
+    detail?: string | null;
+  }[];
+  reader_context?: {account: string | null; elevated: boolean | null} | null;
   events: LogEvent[];
   total_raw: number;
   total_filtered: number;
@@ -127,6 +184,7 @@ export interface SchedulerStatus {
 }
 
 export interface SystemInfo {
+  warnings?: string[];
   processes: any[];
   network_connections: any[];
   services: any[];

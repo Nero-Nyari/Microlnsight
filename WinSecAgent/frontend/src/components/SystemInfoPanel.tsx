@@ -17,13 +17,15 @@ export default function SystemInfoPanel() {
   const [data, setData] = useState<SystemInfo | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('processes');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const handleRefresh = async () => {
     setLoading(true);
+    setError('');
     try {
       const info = await api.system.all();
       setData(info);
-    } catch { /* ignore */ }
+    } catch (e) { setError(e instanceof Error ? e.message : '系统信息读取失败'); }
     setLoading(false);
   };
 
@@ -56,6 +58,8 @@ export default function SystemInfoPanel() {
           </div>
         )}
 
+        {error && <p role="alert" className="text-xs text-red-600 mb-2">{error}</p>}
+        {data?.warnings?.map(w => <p key={w} role="alert" className="text-xs text-amber-800 mb-2">{w}</p>)}
         <div className="flex gap-1 overflow-x-auto">
           {TABS.map((t) => (
             <button key={t.key} onClick={() => setActiveTab(t.key)}

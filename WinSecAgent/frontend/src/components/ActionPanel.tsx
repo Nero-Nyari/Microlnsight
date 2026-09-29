@@ -14,8 +14,15 @@ export default function ActionPanel() {
   const [executing, setExecuting] = useState<number | null>(null);
   const [executorStatus, setExecutorStatus] = useState<{ dry_run: boolean; is_windows: boolean } | null>(null);
 
+  if (selectedIncident?.correlation) {
+    return <div className="text-xs space-y-2">{selectedIncident.correlation.recommendations.map(r=><p key={r}>{r}</p>)}<p className="text-slate-500">本地联合分析仅提供核查建议，不生成可执行处置。</p></div>;
+  }
+
+  if (selectedIncident?.queue !== 'alerts') {
+    return <div className="text-xs bg-slate-50 border rounded p-3 space-y-2"><p>{selectedIncident?.assessment?.classification === 'benign' ? '当前为正常活动，不建议封禁、隔离或删除。' : '先完成分析并补充证据，暂不提供系统处置。'}</p><p>保留原始日志，核对执行账户、操作时间与授权。历史处置不会用于当前记录。</p></div>;
+  }
   if (!actions.length) {
-    return <div className="text-xs text-slate-400 text-center py-4">No actions</div>;
+    return <div className="text-xs text-slate-400 text-center py-4">暂无处置建议，请先复核原文证据。</div>;
   }
 
   const handleApprove = async (actionId: number) => {

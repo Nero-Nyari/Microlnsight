@@ -7,6 +7,12 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.db.session import get_db
 from app.services.action_executor import ActionExecutor
+from app.services.analysis_view import current_actions
+
+
+def require_current_action(action):
+    if action.id not in {item.id for item in current_actions(action.incident)}:
+        raise HTTPException(status_code=409, detail="该建议不属于当前有效告警；正常或待核实日志不能执行历史处置。")
 
 router = APIRouter(prefix="/api/incidents", tags=["actions"])
 
@@ -18,7 +24,7 @@ def list_actions(incident_id: int, db: Session = Depends(get_db)):
     incident = db.query(models.Incident).filter(models.Incident.id == incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    return db.query(models.ResponseAction).filter(models.ResponseAction.incident_id == incident_id).all()
+    return current_actions(incident)
 
 
 @router.post("/{incident_id}/actions/{action_id}/approve")
@@ -29,6 +35,7 @@ def approve_action(incident_id: int, action_id: int, payload: schemas.ActionAppr
     ).first()
     if not action:
         raise HTTPException(status_code=404, detail="动作未找到")
+    require_current_action(action)
     action.status = "approved"
     action.approved_by = payload.approved_by
     db.commit()
@@ -57,6 +64,7 @@ def simulate_action(incident_id: int, action_id: int, db: Session = Depends(get_
     ).first()
     if not action:
         raise HTTPException(status_code=404, detail="动作未找到")
+    require_current_action(action)
     action.status = "simulated"
     db.commit()
     return {"ok": True, "status": action.status, "message": f"已模拟: {action.action_type}"}
@@ -72,6 +80,9 @@ def execute_action(incident_id: int, action_id: int, db: Session = Depends(get_d
     if not action:
         raise HTTPException(status_code=404, detail="动作未找到")
 
+    require_current_action(action)
+    if action.status != "approved":
+        raise HTTPException(status_code=409, detail="请先审批当前处置建议。")
     result = _executor.execute(
         action_type=action.action_type,
         description=action.description,

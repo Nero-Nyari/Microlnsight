@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { Alert, Incident, AgentRun, EvidenceItem, ResponseAction, Report } from '../types';
 
 interface AppState {
+  queueTab: 'logs' | 'alerts';
+  setQueueTab: (tab: 'logs' | 'alerts') => void;
   alerts: Alert[];
   incidents: Incident[];
   selectedIncidentId: number | null;
@@ -21,6 +23,8 @@ interface AppState {
 import { api } from '../services/api';
 
 export const useAppStore = create<AppState>((set, get) => ({
+  queueTab: 'logs',
+  setQueueTab: (queueTab) => set({ queueTab }),
   alerts: [],
   incidents: [],
   selectedIncidentId: null,
@@ -45,12 +49,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedIncidentId: id, loading: true });
     try {
       const incident = await api.incidents.get(id);
+      if (get().selectedIncidentId !== id) return;
       set({
+        queueTab: incident.queue || 'logs',
         selectedIncident: incident,
         agentRuns: incident.agent_runs || [],
         evidence: incident.evidence_items || [],
         actions: incident.response_actions || [],
-        report: incident.reports?.[0] || null,
+        report: [...(incident.reports || [])].sort((a, b) => b.id - a.id)[0] || null,
       });
     } finally {
       set({ loading: false });
@@ -58,11 +64,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   runAnalysis: async (incidentId: number) => {
-    set({ loading: true });
+    set(state => ({ loading: true,
+      incidents: state.incidents.map(item => item.id === incidentId ? {...item, status: 'analyzing', queue: 'logs'} : item),
+      ...(state.selectedIncident?.id === incidentId ? {
+        queueTab: 'logs', agentRuns: [], actions: [], evidence: [], report: null,
+        selectedIncident: {...state.selectedIncident, status: 'analyzing', queue: 'logs',
+          summary: undefined, attack_stage: undefined, risk_level: undefined, confidence: 0, agent_runs: [], correlation: null,
+          assessment: {classification: 'unknown', label: '分析中', queue: 'logs', findings: [], missing_evidence: []}},
+      } : {}),
+    }));
     try {
       await api.incidents.analyze(incidentId);
-      await get().selectIncident(incidentId);
+      if (get().selectedIncidentId === incidentId) await get().selectIncident(incidentId);
       await get().refreshIncidents();
+    } catch (error) {
+      if (get().selectedIncidentId === incidentId) await get().selectIncident(incidentId);
+      await get().refreshIncidents();
+      throw error;
     } finally {
       set({ loading: false });
     }

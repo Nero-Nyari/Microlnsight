@@ -1,7 +1,7 @@
 """Pydantic 模式 - 为 WinSecAgent 扩展."""
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, ConfigDict
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------- Alert schemas ----------
@@ -13,8 +13,14 @@ class AlertBase(BaseModel):
     status: str = "pending"
 
 
+class WindowsLogContext(BaseModel):
+    event_id: Optional[int] = Field(default=None, ge=1, le=65535)
+    channel: Optional[str] = Field(default=None, max_length=200)
+    computer: Optional[str] = Field(default=None, max_length=255)
+
+
 class AlertCreate(AlertBase):
-    pass
+    windows_context: Optional[WindowsLogContext] = None
 
 
 class AlertUpdate(BaseModel):
@@ -51,9 +57,13 @@ class IncidentOut(IncidentBase):
     alert_id: int
     created_at: datetime
     updated_at: datetime
+    queue: str = "logs"
+    assessment: Optional[Dict[str, Any]] = None
 
 
 class IncidentDetail(IncidentOut):
+    source_record: Optional[Dict[str, Any]] = None
+    correlation: Optional[Dict[str, Any]] = None
     alert: Optional[AlertOut] = None
     agent_runs: List["AgentRunOut"] = []
     evidence_items: List["EvidenceItemOut"] = []
@@ -135,6 +145,10 @@ class AnalyzeRequest(BaseModel):
     use_demo_case: Optional[str] = None
 
 
+class CorrelationRequest(BaseModel):
+    window_minutes: int = Field(default=15, ge=1, le=60)
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -148,10 +162,29 @@ class ChatRequest(BaseModel):
 class LogReadRequest(BaseModel):
     channels: Optional[List[str]] = None
     suspicious_only: bool = True
-    max_events: int = 200
+    max_events: int = Field(default=200, ge=1, le=1000)
+
+
+class LogChannelResult(BaseModel):
+    channel: str
+    status: Literal["success", "partial", "failed"]
+    events_read: int
+    error_kind: Optional[str] = None
+    error_code: Optional[int] = None
+    message: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class LogReaderContext(BaseModel):
+    account: Optional[str] = None
+    elevated: Optional[bool] = None
 
 
 class LogReadResponse(BaseModel):
+    warnings: List[str] = Field(default_factory=list)
+    read_status: Literal["success", "partial", "failed", "demo"] = "success"
+    channel_results: List[LogChannelResult] = Field(default_factory=list)
+    reader_context: Optional[LogReaderContext] = None
     events: List[Dict[str, Any]]
     total_raw: int
     total_filtered: int

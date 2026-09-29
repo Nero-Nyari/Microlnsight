@@ -10,7 +10,8 @@ const typeIcon: Record<string, React.ReactNode> = {
 };
 
 export default function EvidencePanel() {
-  const { evidence } = useAppStore();
+  const { evidence, selectedIncident } = useAppStore();
+  const localCorrelation = !!selectedIncident?.correlation;
 
   if (!evidence.length) {
     return <div className="text-xs text-slate-400 text-center py-4">暂无证据</div>;
@@ -18,6 +19,7 @@ export default function EvidencePanel() {
 
   return (
     <div className="space-y-2">
+      {localCorrelation && <p className="text-xs text-slate-500">以下为本轮关联的原始记录快照，不表示攻击置信度。</p>}
       {evidence.map((item) => (
         <div key={item.id} className="border border-slate-200 rounded-md p-2.5 bg-white">
           <div className="flex items-center justify-between mb-1">
@@ -27,16 +29,16 @@ export default function EvidencePanel() {
             </div>
             <span className="text-[10px] text-slate-400">{item.source}</span>
           </div>
-          <div className="text-[11px] text-slate-600 whitespace-pre-wrap leading-relaxed">{item.content}</div>
-          <div className="mt-1 flex items-center gap-2">
+          <div className="text-[11px] text-slate-600 whitespace-pre-wrap break-words leading-relaxed">{item.content}</div>
+          {localCorrelation ? <p className="mt-1 text-[10px] text-slate-500">已保存原文快照</p> : <div className="mt-1 flex items-center gap-2">
             <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-primary-500 rounded-full"
                 style={{ width: `${(item.confidence || 0) * 100}%` }}
               />
             </div>
-            <span className="text-[10px] text-slate-500">{((item.confidence || 0) * 100).toFixed(0)}%</span>
-          </div>
+            <span className="text-[10px] text-slate-500">模型证据评分：{((item.confidence || 0) * 100).toFixed(0)}%（非攻击概率）</span>
+          </div>}
         </div>
       ))}
     </div>

@@ -8,6 +8,8 @@ from app import models, schemas
 from app.db.session import get_db
 from app.services.log_reader import read_windows_logs
 from app.agents.pipeline import analyze_incident
+from app.agents.event_context import serialize_windows_event
+from app.services.analysis_view import assessment_for
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
@@ -28,7 +30,7 @@ def import_to_alerts(
     payload: schemas.LogReadRequest,
     db: Session = Depends(get_db),
 ):
-    """读取日志并自动为可疑事件创建告警."""
+    """读取并保存待分析日志；事件 ID 和原始等级不直接形成告警。"""
     result = read_windows_logs(
         channels=payload.channels,
         suspicious_only=payload.suspicious_only,
@@ -38,7 +40,7 @@ def import_to_alerts(
     for evt in result["events"]:
         alert = models.Alert(
             title=f"EventID {evt.get('EventID')} - {evt.get('Channel', 'Unknown')}",
-            raw_content=evt.get("Message", ""),
+            raw_content=serialize_windows_event(evt, result["is_mock"]),
             source_type="windows_log",
             severity=_event_to_severity(evt.get("EventID", 0)),
             status="pending",
@@ -54,9 +56,13 @@ def import_to_alerts(
 
     return {
         "ok": True,
-        "alerts_created": created,
+        "logs_imported": created,
+        "alerts_created": 0,
         "total_events": result["total_filtered"],
         "is_mock": result["is_mock"],
+        "read_status": result.get("read_status", "success"),
+        "warnings": result.get("warnings", []),
+        "channel_results": result.get("channel_results", []),
     }
 
 
@@ -65,7 +71,7 @@ def import_and_analyze(
     payload: schemas.LogReadRequest,
     db: Session = Depends(get_db),
 ):
-    """读取日志、创建告警并自动分析每个事件."""
+    """导入日志并分析；仅有异常原文证据的结果形成告警。"""
     result = read_windows_logs(
         channels=payload.channels,
         suspicious_only=payload.suspicious_only,
@@ -73,10 +79,11 @@ def import_and_analyze(
     )
     created = 0
     analyzed = 0
+    alerts_created = 0
     for evt in result["events"]:
         alert = models.Alert(
             title=f"EventID {evt.get('EventID')} - {evt.get('Channel', 'Unknown')}",
-            raw_content=evt.get("Message", ""),
+            raw_content=serialize_windows_event(evt, result["is_mock"]),
             source_type="windows_log",
             severity=_event_to_severity(evt.get("EventID", 0)),
             status="pending",
@@ -94,14 +101,19 @@ def import_and_analyze(
         try:
             analyze_incident(db, incident.id)
             analyzed += 1
+            alerts_created += int(assessment_for(incident)["queue"] == "alerts")
         except Exception:
             pass
 
     return {
         "ok": True,
-        "alerts_created": created,
+        "logs_imported": created,
+        "alerts_created": alerts_created,
         "incidents_analyzed": analyzed,
         "is_mock": result["is_mock"],
+        "read_status": result.get("read_status", "success"),
+        "warnings": result.get("warnings", []),
+        "channel_results": result.get("channel_results", []),
     }
 
 

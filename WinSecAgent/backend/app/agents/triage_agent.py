@@ -5,6 +5,7 @@ from typing import Any, Dict
 
 from app.agents.context import benign_internal_debug_result, looks_like_internal_debug_log
 from app.core.llm_provider import get_llm_provider
+from app.agents.event_context import PLATFORM_RULES
 
 SYSTEM_PROMPT = """你是一名资深安全研判分析师。
 请评估已解析的告警，仅返回 JSON 格式：
@@ -13,12 +14,18 @@ SYSTEM_PROMPT = """你是一名资深安全研判分析师。
   "risk_level": "critical/high/medium/low/info",
   "confidence": 0.0,
   "priority": "P0/P1/P2/P3",
-  "classification": "malicious/suspicious/benign",
+  "classification": "malicious/suspicious/benign/unknown",
   "disposition": "true_positive/false_positive/needs_review",
-  "reasoning": "简短的基于证据的解释"
+  "reasoning": "简短的基于证据的解释",
+  "findings": [{"quote": "从原始日志逐字引用的完整异常片段，不少于8个字符", "reason": "该片段为何构成异常线索"}],
+  "missing_evidence": ["还需要哪些证据才能确认结论"]
 }
 
 误报控制规则：
+- 没有异常线索时 findings 使用空数组；不得用事件 ID、工具名称或日志等级本身证明恶意。
+- benign 仅表示当前日志行为正常，disposition 必须为 false_positive；无法判断时使用 unknown/needs_review。
+- suspicious/malicious 必须提供可逐字定位的异常证据 findings。malicious 也不等于已证明入侵成功。
+- Add-Type、进程枚举、ROT13 和 UserAssist 读取均可用于正常管理，不单独作为恶意证据。
 - 不要仅凭 SQL 关键字就将事件判定为 SQL 注入。
 - 在应用日志、数据库调试消息、开发者调试模式、
   最后查询、SQL 审计日志、SQL 日志、内部服务、后端服务、
@@ -48,7 +55,7 @@ def triage(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
         "请进行风险研判。特别注意这是外部攻击记录还是内部/调试/应用日志。"
     )
     try:
-        raw = llm.generate(prompt, system=SYSTEM_PROMPT, max_tokens=1024)
+        raw = llm.generate(prompt, system=SYSTEM_PROMPT + PLATFORM_RULES, max_tokens=1024)
         match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
         if match:
             raw = match.group(1)
@@ -68,6 +75,14 @@ def _guard_triage_result(result: Dict[str, Any], parsed: Dict[str, Any], raw_con
 def _fallback_triage(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
     if looks_like_internal_debug_log(parsed, raw_content):
         return benign_internal_debug_result(parsed, raw_content)
+
+    if parsed.get("platform") == "Windows" and parsed.get("event_id"):
+        return {
+            "event_type": parsed.get("alert_type") or "Windows 事件待核查",
+            "risk_level": "medium", "confidence": 0.5, "priority": "P2",
+            "classification": "unknown", "disposition": "needs_review",
+            "reasoning": "模型研判不可用，已保留 Windows 事件字段供人工核查。事件 ID 本身不足以判断攻击成功，需关联时间范围、次数及处置结果。",
+        }
 
     text = raw_content.lower()
 
@@ -100,7 +115,7 @@ def _fallback_triage(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]
             "reasoning": "发现了 SQL 关键字，但没有明确的外部请求或注入载荷证据。",
         }
 
-    if any(k in text for k in ("rce", "reverse shell", "log4j")):
+    if re.search(r"\brce\b|reverse shell|log4j", text):
         return {
             "event_type": "高危漏洞利用尝试",
             "risk_level": "critical",

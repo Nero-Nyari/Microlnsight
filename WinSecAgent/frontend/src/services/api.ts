@@ -9,7 +9,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    const detail = Array.isArray(err.detail) ? err.detail.map((item: {msg?: string}) => item.msg || '字段无效').join('；') : err.detail;
+    throw new Error(detail || err.error || `HTTP ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -18,8 +19,9 @@ export const api = {
   health: () => request<{ ok: boolean }>('/health'),
 
   alerts: {
+    cases: () => request<{ id: string; title: string; severity: string }[]>('/alerts/cases'),
     list: () => request<Alert[]>('/alerts'),
-    create: (data: Partial<Alert>) => request<Alert>('/alerts', { method: 'POST', body: JSON.stringify(data) }),
+    create: (data: Partial<Alert> & { windows_context?: { event_id?: number; channel?: string; computer?: string } }) => request<Alert>('/alerts', { method: 'POST', body: JSON.stringify(data) }),
     delete: (id: number) => request<any>(`/alerts/${id}`, { method: 'DELETE' }),
     fromCase: (caseId: string) => request<Alert>(`/alerts/from-case/${caseId}`, { method: 'POST' }),
   },
@@ -29,6 +31,7 @@ export const api = {
     get: (id: number) => request<Incident>(`/incidents/${id}`),
     create: (data: Partial<Incident>) => request<Incident>('/incidents', { method: 'POST', body: JSON.stringify(data) }),
     analyze: (id: number) => request<any>(`/incidents/${id}/analyze`, { method: 'POST' }),
+    correlate: (id: number, windowMinutes: number) => request<{ok: boolean}>(`/incidents/${id}/correlate`, {method: 'POST', body: JSON.stringify({window_minutes: windowMinutes})}),
   },
 
   agents: {

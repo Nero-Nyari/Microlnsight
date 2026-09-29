@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import APP_NAME, APP_VERSION, CORS_ORIGINS
 from app.db.base import Base
-from app.db.session import engine
+from app.db.session import engine, SessionLocal
+from app.services.recovery import recover_interrupted_analyses
 from app.api import (
     alerts, incidents, agents, evidence, actions, reports,
     logs, knowledge, memory, scheduler, system_info, models,
@@ -21,6 +22,8 @@ from app.api import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        recover_interrupted_analyses(db)
     yield
 
 
