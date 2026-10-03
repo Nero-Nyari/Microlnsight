@@ -19,7 +19,7 @@ export const api = {
   health: () => request<{ ok: boolean }>('/health'),
 
   alerts: {
-    cases: () => request<{ id: string; title: string; severity: string }[]>('/alerts/cases'),
+    cases: () => request<{ id: string; title: string; severity: string; record_count: number; hint: string }[]>('/alerts/cases'),
     list: () => request<Alert[]>('/alerts'),
     create: (data: Partial<Alert> & { windows_context?: { event_id?: number; channel?: string; computer?: string } }) => request<Alert>('/alerts', { method: 'POST', body: JSON.stringify(data) }),
     delete: (id: number) => request<any>(`/alerts/${id}`, { method: 'DELETE' }),

@@ -3,6 +3,7 @@ export interface Alert {
   title: string;
   raw_content?: string;
   source_type: string;
+  is_demo: boolean;
   severity: string;
   status: string;
   created_at: string;
@@ -184,6 +185,7 @@ export interface SchedulerStatus {
 }
 
 export interface SystemInfo {
+  collection_errors?: Record<string, string>;
   warnings?: string[];
   processes: any[];
   network_connections: any[];

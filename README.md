@@ -15,16 +15,28 @@ Microlnsight Server Security Log Monitoring and Analysis with Local Large Langua
 
 应用位于 [`WinSecAgent/`](WinSecAgent/)。
 
+当前使用的远程仓库为 [Microlnsight](https://github.com/Nero-Nyari/Microlnsight)，应用名称为 WinSecAgent。
+
 ```powershell
 git clone https://github.com/Nero-Nyari/Microlnsight.git
 cd Microlnsight/WinSecAgent
 ```
 
-安装与启动步骤见 [应用说明](WinSecAgent/README.md)。前端默认端口 5173，后端默认端口 8000；端口占用时以终端输出为准。
+安装与启动步骤见 [应用说明](WinSecAgent/README.md)。统一入口 `python dev.py start` 使用前端 5173、后端 8000；端口占用时明确报错，请先停止已有服务。
 
 - [Windows 验收记录与测试命令](WinSecAgent/docs/windows-validation.md)
+- [三分钟演示：正常、单次失败、连续失败后成功](WinSecAgent/docs/demo-walkthrough.md)
 - [固定回归样本说明](WinSecAgent/backend/tests/fixtures/README.md)
 - [许可证](LICENSE)
+
+## 工作区结构与当前进度
+
+- `WinSecAgent/backend/`：API、日志采集、关联规则及后端测试。
+- `WinSecAgent/frontend/`：工作台、工具设置和来源切换测试。
+- `WinSecAgent/docs/`：使用说明、演示流程与验收记录。
+- `WinSecAgent/dev.py` / `start.bat`：统一检查、启动及后端测试入口。
+
+截至 2026-10-03，用户手动验证已读到 Security 等五个日志通道，重启后网络连接、服务和计划任务列表可显示。计划任务状态和下次运行时间仍待完善。当前异常关联主要由合成样本验证；真实异常日志的采集、关联、证据核对和报告验证仍是下一阶段工作，不能将采集成功视为检测能力验收完成。
 
 ## 本地数据与权限
 

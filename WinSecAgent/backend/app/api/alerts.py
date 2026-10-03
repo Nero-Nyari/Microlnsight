@@ -49,7 +49,10 @@ def list_alerts(queue: Optional[Literal["logs", "alerts"]] = None, db: Session =
 
 @router.get("/cases")
 def list_demo_cases():
-    return [{key: case[key] for key in ("id", "title", "severity")} for case in DEMO_CASES]
+    return [{**{key: case[key] for key in ("id", "title", "severity")},
+             "record_count": len(case.get("records", [case["raw_content"]])),
+             "hint": case.get("hint", "单条演示输入；分析结论以实际证据为准。")}
+            for case in DEMO_CASES]
 
 
 @router.get("/{alert_id}", response_model=schemas.AlertOut)
@@ -74,14 +77,20 @@ def delete_alert(alert_id: int, db: Session = Depends(get_db)):
 def create_from_case(case_id: str, db: Session = Depends(get_db)):
     for case in DEMO_CASES:
         if case["id"] == case_id:
-            alert = models.Alert(
-                title=case["title"],
-                raw_content=case["raw_content"],
-                source_type="windows_demo",
-                severity=case["severity"],
-                status="pending",
-            )
-            db.add(alert)
+            records = case.get("records", [case["raw_content"]])
+            # One transaction imports the complete scenario. Return its last record
+            # as the anchor; the existing incident-create API is idempotent.
+            for index, raw in enumerate(records):
+                alert = models.Alert(
+                    title=case["title"] + (f" · 记录 {index + 1}/{len(records)}" if len(records) > 1 else ""),
+                    raw_content=raw,
+                    source_type="windows_demo",
+                    severity=case["severity"],
+                    status="pending",
+                )
+                db.add(alert)
+                db.flush()
+                db.add(models.Incident(alert_id=alert.id, status="pending"))
             db.commit()
             db.refresh(alert)
             return alert

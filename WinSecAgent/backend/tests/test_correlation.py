@@ -174,6 +174,43 @@ class CorrelationApiTests(unittest.TestCase):
         regenerated = self.client.post(f'/api/incidents/{seed.id}/report').json()
         self.assertEqual(regenerated['content'],report['content'])
 
+    def test_guided_demo_import_analysis_and_download(self):
+        expected = [('windows_demo_normal', 1, 'logs'), ('windows_demo_single', 1, 'logs'),
+                    ('windows_demo_sequence', 6, 'alerts')]
+        for case_id, count, queue in expected:
+            with self.subTest(case=case_id):
+                response = self.client.post(f'/api/alerts/from-case/{case_id}')
+                self.assertEqual(response.status_code, 200, response.text)
+                alert = response.json()
+                incident = self.client.post('/api/incidents', json={'alert_id': alert['id']}).json()
+                self.assertEqual(incident['queue'], 'logs')
+                response = self.client.post(f"/api/incidents/{incident['id']}/correlate", json={'window_minutes': 15})
+                self.assertEqual(response.status_code, 200, response.text)
+                detail = self.client.get(f"/api/incidents/{incident['id']}").json()
+                self.assertEqual(detail['queue'], queue)
+                self.assertEqual(len(detail['correlation']['records']), count)
+                self.assertTrue(all(r['is_demo'] for r in detail['correlation']['records']))
+                self.assertEqual(detail['response_actions'], [])
+                report = detail['reports'][0]
+                self.assertEqual(self.client.get(f"/api/reports/{report['id']}/download").text, report['content'])
+                self.assertNotIn('None', report['content'])
+                if queue == 'alerts':
+                    self.assertEqual([f['rule_id'] for f in detail['correlation']['findings']],
+                                     ['repeated_failed_logon', 'failure_then_success'])
+                    self.assertEqual(detail['correlation']['findings'][0]['failure_count'], 5)
+        self.assertEqual(self.db.query(models.Alert).count(), 8)
+        self.assertEqual(self.db.query(models.Incident).count(), 8)
+
+    def test_reloading_demo_does_not_inflate_failure_count(self):
+        for _ in range(2):
+            alert = self.client.post('/api/alerts/from-case/windows_demo_sequence').json()
+        incident = self.client.post('/api/incidents', json={'alert_id': alert['id']}).json()
+        self.client.post(f"/api/incidents/{incident['id']}/correlate", json={'window_minutes': 15})
+        detail = self.client.get(f"/api/incidents/{incident['id']}").json()
+        self.assertEqual(detail['correlation']['duplicates_excluded'], 6)
+        self.assertEqual(detail['correlation']['findings'][0]['failure_count'], 5)
+        self.assertEqual(len(detail['correlation']['records']), 6)
+
     def test_scope_excludes_other_hosts_times_and_demo_flags(self):
         events = copy.deepcopy(CASES[5]['events'])
         other_host, other_time, real = [copy.deepcopy(events[0]) for _ in range(3)]

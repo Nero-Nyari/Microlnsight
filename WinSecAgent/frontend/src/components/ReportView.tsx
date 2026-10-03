@@ -73,7 +73,7 @@ export default function ReportView() {
       {report && (
         <div className="flex-1 overflow-auto">
           <div className="prose prose-sm max-w-none prose-slate">
-            <pre className="bg-white border border-slate-200 rounded-md p-3 text-xs whitespace-pre-wrap font-mono text-slate-700">
+            <pre className="bg-white border border-slate-200 rounded-md p-3 text-xs whitespace-pre-wrap break-words font-mono text-slate-700">
               {report.content}
             </pre>
           </div>

@@ -4,7 +4,7 @@ import { api } from '../services/api';
 import { useAppStore } from '../stores/appStore';
 import type { LogReadResult } from '../types';
 
-export default function LogReader() {
+export default function LogReader({ onImported }: { onImported?: () => void }) {
   const [result, setResult] = useState<LogReadResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -44,6 +44,7 @@ export default function LogReader() {
       if (lastId) await store.selectIncident(lastId);
       setMessage(`已将 ${selected.size} 条选中日志加入日志列表，可在事件详情中开始分析。`);
       setSelected(new Set());
+      onImported?.();
     } catch (e) { setError(e instanceof Error ? e.message : '导入失败'); }
     finally { setImporting(false); }
   };

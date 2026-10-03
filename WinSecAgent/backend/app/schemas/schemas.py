@@ -1,7 +1,7 @@
 """Pydantic 模式 - 为 WinSecAgent 扩展."""
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 # ---------- Alert schemas ----------
@@ -35,6 +35,13 @@ class AlertOut(AlertBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def is_demo(self) -> bool:
+        # Match the evidence reader, including historical pasted demo envelopes.
+        from app.agents.event_context import extract_event_context
+        return 'demo' in self.source_type or extract_event_context(self.raw_content or '')['is_demo']
 
 
 # ---------- Incident schemas ----------

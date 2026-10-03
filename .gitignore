@@ -29,6 +29,8 @@ WinSecAgent/backend/data/*
 *.sqlite
 *.sqlite3
 *.log
+*.evtx
+*.etl
 outputs/
 
 # IDE

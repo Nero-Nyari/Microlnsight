@@ -28,9 +28,14 @@ def collect_services():
 def collect_network_connections():
     if platform.system() != "Windows":
         raise RuntimeError("此版本仅支持 Windows 本机采集")
-    result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # Localized netstat headings may use a different code page from Python.
+    # Replace undecodable heading bytes: protocol/address/PID fields are ASCII.
+    # Strict decoding in subprocess's pipe reader can otherwise leave stdout=None.
+    result = subprocess.run(["netstat", "-ano"], capture_output=True, encoding="utf-8", errors="replace", timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode:
         raise RuntimeError("网络连接读取失败")
+    if result.stdout is None:
+        raise RuntimeError("网络连接命令未返回可读取的输出，请重新采集")
     rows = []
     for line in result.stdout.splitlines():
         p = line.split()
@@ -61,12 +66,15 @@ def collect_registry_suspicious():
 
 
 def collect_all():
-    result = {"platform": platform.system(), "is_mock": False, "warnings": []}
+    result = {"platform": platform.system(), "is_mock": False, "warnings": [], "collection_errors": {}}
+    labels = {"processes": "进程", "network_connections": "网络连接", "services": "服务",
+              "scheduled_tasks": "计划任务", "registry": "注册表"}
     for name, collector in (("processes", collect_processes), ("network_connections", collect_network_connections),
                             ("services", collect_services), ("scheduled_tasks", collect_scheduled_tasks), ("registry", collect_registry_suspicious)):
         try:
             result[name] = collector()
         except Exception as exc:
             result[name] = []
-            result["warnings"].append(f"{name} 未成功读取：{exc}。未使用演示数据替代。")
+            result["collection_errors"][name] = str(exc)
+            result["warnings"].append(f"{labels[name]}未成功读取：{exc}。未使用演示数据替代。")
     return result

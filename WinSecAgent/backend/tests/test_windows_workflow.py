@@ -11,7 +11,7 @@ from app.agents.parser_agent import parse_alert, _fallback_parse
 from app.agents.evidence_agent import gather_evidence
 from app.agents.response_agent import _fallback_actions
 from app.agents.report_agent import generate_report
-from app.cases.demo_cases import DEMO_CASES
+from app.cases.demo_cases import DEMO_CASES, get_demo_case
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
@@ -20,7 +20,7 @@ from app import models
 
 class SourceTests(unittest.TestCase):
     def test_windows_json_preserves_fields(self):
-        parsed = parse_alert(DEMO_CASES[0]['raw_content'])
+        parsed = parse_alert(get_demo_case('windows_failed_logon')['raw_content'])
         self.assertEqual((parsed['platform'], parsed['event_id'], parsed['username']), ('Windows', '4625', 'lab_admin'))
         self.assertEqual(parsed['computer'], 'WIN-LAB-01')
         self.assertEqual(parsed['source_ip'], '192.0.2.10')
@@ -36,7 +36,7 @@ class SourceTests(unittest.TestCase):
         self.assertIsNone(parsed['target_port'])
 
     def test_manual_envelope_preserves_embedded_json(self):
-        raw = serialize_windows_event({'OriginalLog': DEMO_CASES[0]['raw_content'], 'Computer': 'OVERRIDE'}, True)
+        raw = serialize_windows_event({'OriginalLog': get_demo_case('windows_failed_logon')['raw_content'], 'Computer': 'OVERRIDE'}, True)
         parsed = parse_alert(raw)
         self.assertEqual(parsed['event_id'], '4625')
         self.assertEqual(parsed['computer'], 'OVERRIDE')
@@ -53,7 +53,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(extract_event_context('login failed')['platform'], 'Unknown')
 
     def test_evidence_does_not_invent_asset_or_ioc(self):
-        raw = DEMO_CASES[0]['raw_content']
+        raw = get_demo_case('windows_failed_logon')['raw_content']
         evidence = gather_evidence(parse_alert(raw), raw)
         text = json.dumps(evidence, ensure_ascii=False)
         self.assertNotIn('CentOS', text)
@@ -63,8 +63,8 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(evidence[0]['source'], 'demo_input')
 
     def test_windows_fallback_actions(self):
-        parsed = parse_alert(DEMO_CASES[0]['raw_content'])
-        text = json.dumps(_fallback_actions(parsed, DEMO_CASES[0]['raw_content']), ensure_ascii=False)
+        parsed = parse_alert(get_demo_case('windows_failed_logon')['raw_content'])
+        text = json.dumps(_fallback_actions(parsed, get_demo_case('windows_failed_logon')['raw_content']), ensure_ascii=False)
         self.assertIn('Windows', text)
         self.assertNotIn('None', text)
         self.assertNotIn('kill -9', text)
@@ -74,7 +74,7 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(parse_alert(case['raw_content'])['platform'], 'Windows')
 
     def test_report_is_complete_without_an_independent_model_verdict(self):
-        raw = DEMO_CASES[0]['raw_content']
+        raw = get_demo_case('windows_failed_logon')['raw_content']
         parsed = parse_alert(raw)
         report = generate_report('测试', parsed, {}, gather_evidence(parsed, raw), {}, [])
         self.assertIn('## 6. 复盘建议', report)
@@ -98,12 +98,37 @@ class ApiTests(unittest.TestCase):
 
     def test_cases_and_manual_validation(self):
         cases = self.client.get('/api/alerts/cases').json()
-        self.assertEqual(len(cases), 5)
+        self.assertEqual(len(cases), len(DEMO_CASES))
         self.assertTrue(all(c['id'].startswith('windows_') for c in cases))
         bad = self.client.post('/api/alerts', json={'title':'空', 'raw_content':' ', 'windows_context':{}})
         self.assertEqual(bad.status_code, 422)
         wrong = self.client.post('/api/alerts', json={'title':'错误平台','raw_content':'Platform: Linux\nHost: Ubuntu','windows_context':{}})
         self.assertEqual(wrong.status_code, 422)
+
+    def test_demo_source_is_consistent_in_list_detail_and_evidence(self):
+        samples = [
+            ('windows_demo', '{"IsDemo": false}', True),
+            ('windows_manual', '{"IsDemo": true}', True),
+            ('windows_manual', json.dumps({'OriginalLog': '{"IsDemo": true}'}), True),
+            ('windows_manual', '[演示数据] 合成事件', True),
+            ('windows_log', '{"IsDemo": false}', False),
+            ('windows_manual', '用户提供的日志原文', False),
+        ]
+        for source, raw, expected in samples:
+            with self.subTest(source=source, raw=raw):
+                response = self.client.post('/api/alerts', json={
+                    'title': '来源测试', 'source_type': source, 'raw_content': raw,
+                    'is_demo': not expected,  # Client cannot override the derived label.
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                alert = response.json()
+                self.assertEqual(alert['is_demo'], expected)
+                incident = self.client.post('/api/incidents', json={'alert_id': alert['id']}).json()
+                detail = self.client.get(f"/api/incidents/{incident['id']}").json()
+                self.assertEqual(detail['alert']['is_demo'], expected)
+                self.assertEqual(detail['source_record']['is_demo'], expected)
+                listed = next(row for row in self.client.get('/api/alerts').json() if row['id'] == alert['id'])
+                self.assertEqual(listed['is_demo'], expected)
 
     def test_recovery_retains_original_record(self):
         from app.services.recovery import recover_interrupted_analyses
@@ -118,7 +143,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(incident.alert.raw_content, 'original')
 
     def test_manual_creation_and_report_regeneration_keep_platform(self):
-        created = self.client.post('/api/alerts', json={'title':'Windows 测试','raw_content':DEMO_CASES[0]['raw_content'],'windows_context':{}})
+        created = self.client.post('/api/alerts', json={'title':'Windows 测试','raw_content':get_demo_case('windows_failed_logon')['raw_content'],'windows_context':{}})
         self.assertEqual(created.status_code, 200)
         incident = self.client.post('/api/incidents', json={'alert_id':created.json()['id']}).json()
         with patch('app.agents.report_agent.generate_report', return_value='Windows report') as generate:
@@ -141,7 +166,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(parsed['username'], 'user1')
 
     def test_windows_report_does_not_reuse_old_linux_actions(self):
-        alert = models.Alert(title='Windows', raw_content=DEMO_CASES[1]['raw_content'])
+        alert = models.Alert(title='Windows', raw_content=get_demo_case('windows_service')['raw_content'])
         self.session.add(alert)
         self.session.flush()
         incident = models.Incident(alert_id=alert.id)

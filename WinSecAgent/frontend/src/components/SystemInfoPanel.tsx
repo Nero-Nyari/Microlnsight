@@ -36,6 +36,8 @@ export default function SystemInfoPanel() {
       : activeTab === 'registry' ? data.registry
       : data.processes
     : [];
+  const sourceKey = { processes: 'processes', network: 'network_connections', services: 'services', tasks: 'scheduled_tasks', registry: 'registry' }[activeTab];
+  const collectionFailed = !!data?.collection_errors?.[sourceKey];
 
   return (
     <div className="flex flex-col h-full">
@@ -54,12 +56,13 @@ export default function SystemInfoPanel() {
 
         {data && (
           <div className="text-[10px] text-slate-400 mb-2">
-            Platform: {data.platform} {data.is_mock && '(Demo Mode)'}
+            平台：{data.platform} {data.is_mock && '（演示数据）'}
           </div>
         )}
 
         {error && <p role="alert" className="text-xs text-red-600 mb-2">{error}</p>}
         {data?.warnings?.map(w => <p key={w} role="alert" className="text-xs text-amber-800 mb-2">{w}</p>)}
+        {activeTab === 'processes' && data?.processes.some(item => item.path === '路径不可读') && <p className="mb-2 text-xs leading-5 text-slate-500">“路径不可读”表示本次未获取到该字段，不能仅据此判断后端是否以管理员身份运行。</p>}
         <div className="flex gap-1 overflow-x-auto">
           {TABS.map((t) => (
             <button key={t.key} onClick={() => setActiveTab(t.key)}
@@ -99,7 +102,7 @@ export default function SystemInfoPanel() {
           </div>
         ))}
         {data && items.length === 0 && (
-          <div className="text-xs text-slate-400 text-center py-4">暂无数据</div>
+          <div role="status" className="text-xs text-slate-500 text-center py-4">{collectionFailed ? '本项采集失败，请查看上方原因后重试。' : '本次采集未返回记录。'}</div>
         )}
       </div>
     </div>

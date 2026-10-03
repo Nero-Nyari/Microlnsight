@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import type { Alert, Incident, AgentRun, EvidenceItem, ResponseAction, Report } from '../types';
+import { sourceScopeFor, type SourceScope } from '../services/logSource';
 
 interface AppState {
+  sourceScope: SourceScope;
+  setSourceScope: (scope: SourceScope) => void;
   queueTab: 'logs' | 'alerts';
   setQueueTab: (tab: 'logs' | 'alerts') => void;
   alerts: Alert[];
@@ -23,6 +26,12 @@ interface AppState {
 import { api } from '../services/api';
 
 export const useAppStore = create<AppState>((set, get) => ({
+  sourceScope: 'actual',
+  setSourceScope: (sourceScope) => {
+    if (sourceScope === get().sourceScope) return;
+    set({ sourceScope, queueTab: 'logs', selectedIncidentId: null, selectedIncident: null,
+      agentRuns: [], evidence: [], actions: [], report: null, loading: false });
+  },
   queueTab: 'logs',
   setQueueTab: (queueTab) => set({ queueTab }),
   alerts: [],
@@ -51,6 +60,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const incident = await api.incidents.get(id);
       if (get().selectedIncidentId !== id) return;
       set({
+        sourceScope: incident.source_record?.is_demo ? 'demo' : sourceScopeFor(incident.alert),
         queueTab: incident.queue || 'logs',
         selectedIncident: incident,
         agentRuns: incident.agent_runs || [],

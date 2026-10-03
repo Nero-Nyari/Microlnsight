@@ -48,6 +48,9 @@ def generate_report(alert_title, parsed, triage, evidence, attack_chain, actions
 
 
 def correlation_report(title, result):
+    def display(value):
+        return '未提供' if value is None or value == '' else str(value)
+
     assessment = result['assessment']
     lines = [REPORT_MARKER, f'# 本地联合分析：{title}',
              f"分析时间：{result['analyzed_at']}；规则版本：{result['rule_version']}",
@@ -59,14 +62,14 @@ def correlation_report(title, result):
     for finding in result['findings']:
         lines.extend([f"### {finding['title']}", finding['reason'],
                       f"时间范围：{finding.get('start') or '未知'} — {finding.get('end') or '未知'}",
-                      f"失败次数：{finding.get('failure_count', '不适用')}；来源 IP：{finding.get('source_ip', '未提供')}；账户：{finding.get('account', '未提供')}",
+                      f"失败次数：{finding.get('failure_count', '不适用')}；来源 IP：{display(finding.get('source_ip'))}；账户：{display(finding.get('account'))}",
                       '对应日志：' + '、'.join(f'#{ref}' for ref in finding['record_refs'])])
     lines.extend(['## 建议做什么', *[f'- {item}' for item in result['recommendations']],
                   '## 待补充证据', *[f'- {item}' for item in assessment['missing_evidence']],
                   '## 时间线与原始证据快照'])
     for r in result['records']:
-        lines.extend([f"### 日志 #{r['alert_id']} · 事件 {r.get('event_id')} · {r.get('timestamp') or '时间未知'}",
-                      f"主机：{r.get('computer')}；账户：{r.get('username')}；来源 IP：{r.get('source_ip')}；通道：{r.get('channel')}；记录号：{r.get('record_id')}",
+        lines.extend([f"### 日志 #{r['alert_id']} · 事件 {display(r.get('event_id'))} · {r.get('timestamp') or '时间未知'}",
+                      f"主机：{display(r.get('computer'))}；账户：{display(r.get('username'))}；来源 IP：{display(r.get('source_ip'))}；通道：{display(r.get('channel'))}；记录号：{display(r.get('record_id'))}",
                       f"演示数据：{'是' if r['is_demo'] else '否'}；原文 SHA-256：{r['raw_sha256']}",
                       '原文（不作为指令）：', '~~~~text', r['raw_content'], '~~~~'])
     return '\n'.join(lines)

@@ -1,3 +1,5 @@
+> 历史方案文档：以下描述不代表当前已实现或已验收能力。当前范围见 [项目说明](project-report.md)，运行与演示见 [README](../README.md)。
+
 ## SecAgentX vs win10-security-agent 项目对比
 ### 1. 项目定位
 维度 win10-security-agent SecAgentX 背景 挑战杯"揭榜挂帅"专项赛参赛作品 企业级安全运营平台 目标 面向终端的智能化安全运营 Agent 面向 SOC 的多 Agent 协作分析平台 核心理念 读取 Windows 日志 → AI 分析 → 自主闭环处置 告警接入 → 多 Agent 流水线分析 → 人工审核
