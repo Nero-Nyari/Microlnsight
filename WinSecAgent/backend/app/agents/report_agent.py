@@ -52,11 +52,26 @@ def correlation_report(title, result):
         return '未提供' if value is None or value == '' else str(value)
 
     assessment = result['assessment']
+    scope = (f"范围：本次选取的已导入日志；去重记录数：{len(result['records'])}；"
+             f"后续成功登录关联窗口：{result['window_minutes']} 分钟" if result.get('scope') == 'batch'
+             else f"窗口：当前记录前后各 {result['window_minutes']} 分钟；去重记录数：{len(result['records'])}")
     lines = [REPORT_MARKER, f'# 本地联合分析：{title}',
              f"分析时间：{result['analyzed_at']}；规则版本：{result['rule_version']}",
              '## 发现了什么', assessment['label'], assessment['reasoning'],
              '仅为本地规则线索，未证实入侵成功；时间相邻不证明因果关系。',
-             '## 依据是什么', f"窗口：当前记录前后各 {result['window_minutes']} 分钟；去重记录数：{len(result['records'])}"]
+             '## 依据是什么', scope]
+    coverage = result.get('coverage')
+    if coverage:
+        lines.extend(['## 分析范围与解析质量',
+                      f"输入 {coverage['input_records']} 条；保留 {coverage['retained']} 条；重复排除 {coverage['duplicates']} 条；标识冲突排除 {coverage['conflicts']} 条。",
+                      f"结构已识别 {coverage['identified']} 条；未识别 {coverage['unparsed']} 条；缺带时区时间 {coverage['missing_time']} 条；规则未覆盖 {coverage['unsupported']} 条。",
+                      f"登录失败中有 {coverage['failure_records_excluded']} 条因缺少必要字段或通道不符，未参与次数阈值判断。",
+                      '缺少时间、缺少字段和规则未覆盖是独立维度，可重叠；记录保留不等于所有规则均可分析。'])
+        if 'selected_total' in coverage:
+            lines.append(f"所选范围 {coverage['selected_total']} 条；超限跳过 {coverage['skipped_limit']} 条。")
+        for source in coverage['sources']:
+            lines.append(f"- 来源 {display(source['host'])} / {display(source['channel'])}：保留 {source['retained']} 条；"
+                         f"可识别时间（UTC）{source['start'] or '未知'} 至 {source['end'] or '未知'}；缺时间 {source['missing_time']} 条。")
     for warning in result['warnings']:
         lines.append(f'- 范围说明：{warning}')
     for finding in result['findings']:

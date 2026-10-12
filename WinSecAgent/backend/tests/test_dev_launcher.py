@@ -12,6 +12,16 @@ spec.loader.exec_module(dev)
 
 
 class LauncherTests(unittest.TestCase):
+    def test_cli_launch_does_not_require_frontend(self):
+        with patch.object(dev.sys, 'argv', ['dev.py', 'cli']), \
+                patch.object(dev, 'select_python', return_value='python'), \
+                patch.object(dev, 'check_backend'), \
+                patch.object(dev, 'frontend_runtime') as frontend, \
+                patch.object(dev.subprocess, 'call', return_value=0) as launch:
+            self.assertEqual(dev.main(), 0)
+            frontend.assert_not_called()
+            self.assertIn('cli.py', launch.call_args.args[0][-1])
+
     def test_incomplete_environments_fall_back_to_working_interpreter(self):
         bad = subprocess.CompletedProcess([], 0, json.dumps({'supported': True, 'missing': ['fastapi']}))
         good = subprocess.CompletedProcess([], 0, json.dumps({'supported': True, 'missing': []}))

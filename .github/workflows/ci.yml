@@ -1,0 +1,65 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cli-guard:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install model transport dependency
+        run: python -m pip install requests
+      - name: Check cross-platform CLI contracts
+        working-directory: WinSecAgent
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_guard.py -v
+      - name: Check native editions and release contents
+        working-directory: WinSecAgent
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_native_cli.py -v
+      - name: Check update transactions
+        working-directory: WinSecAgent
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_cli_update.py -v
+
+  backend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: WinSecAgent/backend/requirements.txt
+      - name: Install backend dependencies
+        working-directory: WinSecAgent
+        run: python -m pip install -r backend/requirements.txt
+      - name: Run backend tests
+        working-directory: WinSecAgent/backend
+        env:
+          WINSEC_TEST_MODE: '1'
+        run: python -X utf8 -m unittest discover -s tests -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: WinSecAgent/frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: WinSecAgent/frontend
+        run: npm ci
+      - name: Run frontend tests
+        working-directory: WinSecAgent/frontend
+        run: npm test
+      - name: Build frontend
+        working-directory: WinSecAgent/frontend
+        run: npm run build

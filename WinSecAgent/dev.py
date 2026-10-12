@@ -142,14 +142,17 @@ def start(python, node, vite):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["check", "test", "start"], nargs="?", default="start")
+    parser.add_argument("command", choices=["check", "test", "start", "cli"], nargs="?", default="start")
     parser.add_argument("--python", help="Use this exact backend Python executable (no fallback)")
     args = parser.parse_args()
     try:
         python = select_python(args.python)
         if args.command == "test":
-            return subprocess.call([python, "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=BACKEND)
+            return subprocess.call([python, "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"],
+                                   cwd=BACKEND, env={**os.environ, "WINSEC_TEST_MODE": "1"})
         check_backend(python)
+        if args.command == "cli":
+            return subprocess.call([python, "-X", "utf8", str(ROOT / "cli.py")], cwd=ROOT)
         node, vite = frontend_runtime()
         if args.command == "check":
             print("Environment checks passed. No services started.")

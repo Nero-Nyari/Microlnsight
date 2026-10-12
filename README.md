@@ -1,7 +1,18 @@
 # Microlnsight
 Microlnsight Server Security Log Monitoring and Analysis with Local Large Language Models
 
-当前仓库包含 Windows 版本 **WinSecAgent**，基于 FastAPI、React 和可配置模型服务，支持 Windows 日志读取、证据追溯和联合分析。
+当前仓库包含 **WinSecAgent Windows / Linux 本机 CLI**，以及原有 FastAPI + React 工作台。各平台在需要保护的主机上安装，独立读取、分析和保存本机日志。
+
+## 本机 CLI 样板 v0.2.1
+
+- 在 [Releases](https://github.com/Nero-Nyari/Microlnsight/releases) 下载 Windows ZIP 或 Linux tar.gz；需要 Python 3.10+。
+- Windows：解压后执行 `install-windows.bat`，使用 `start-windows.bat` 启动。
+- Linux：解压后执行 `sh install-linux.sh`，使用 `sh start-linux.sh` 启动。
+- 菜单支持本机日志分析、任务证据、模型连续追问、本地/API 模型配置，以及检查更新和更新。
+- 处置仅模拟；模拟器检查创建、到期和撤销，不修改真实防火墙，不声称已验证防护效果。
+- 更新保留本机数据，先校验与试运行再切换；失败恢复旧文件。更新源为本仓库的 `cli-vX.Y.Z` 发布版本。
+
+完整步骤和当前限制见 [本机 CLI 安装说明](WinSecAgent/NATIVE_CLI.md)。源码目录可用 `python agent.py` 启动本机版；`python dev.py cli` 保留原 Windows 数据库工作台。
 
 ## 当前功能
 

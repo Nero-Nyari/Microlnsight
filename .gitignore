@@ -4,6 +4,12 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv-cli/
+.updates/
+.cli-runtime.lock
+.update-transaction.json
+WinSecAgent/runtime.json
+WinSecAgent/data/
 venv/
 myenv/
 mayenv/

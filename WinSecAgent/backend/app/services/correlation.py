@@ -71,7 +71,38 @@ def service_binary(command):
     return match.group(1) if match else command.split(' ', 1)[0]
 
 
+def analysis_coverage(records, rows, duplicates, conflicts):
+    supported = {('4625', 'security'), ('4624', 'security'), ('4697', 'security'), ('7045', 'system')}
+    sources = {}
+    for r in rows:
+        key = (str(r.get('computer') or '主机未知'), str(r.get('channel') or '通道未知'))
+        info = sources.setdefault(key, dict(host=key[0], channel=key[1], retained=0,
+                                           identified=0, unsupported=0, missing_time=0, start=None, end=None))
+        info['retained'] += 1
+        identified = r.get('platform') == 'Windows' and bool(r.get('event_id') and r.get('channel'))
+        info['identified'] += int(identified)
+        info['unsupported'] += int(not identified or (str(r.get('event_id')), str(r.get('channel')).casefold()) not in supported)
+        when = timestamp(r.get('timestamp'))
+        if when:
+            value = when.isoformat()
+            info['start'] = min(info['start'], value) if info['start'] else value
+            info['end'] = max(info['end'], value) if info['end'] else value
+        else:
+            info['missing_time'] += 1
+    identified = sum(info['identified'] for info in sources.values())
+    return dict(input_records=len(records), retained=len(rows), identified=identified,
+                unparsed=len(rows) - identified, duplicates=duplicates, conflicts=conflicts,
+                unsupported=sum(info['unsupported'] for info in sources.values()),
+                missing_time=sum(info['missing_time'] for info in sources.values()),
+                failure_records_excluded=sum(r.get('event_id') == '4625' and not (
+                    r.get('platform') == 'Windows' and str(r.get('channel') or '').casefold() == 'security'
+                    and r.get('record_id') is not None and r.get('computer') and r.get('username')
+                    and timestamp(r.get('timestamp')) and source_ip(r.get('source_ip'))) for r in rows),
+                sources=list(sources.values()))
+
+
 def analyze_records(records, window_minutes=15, warnings=None):
+    records = list(records)
     rows, duplicates, conflicts = deduplicate(records)
     rows.sort(key=lambda r: (timestamp(r.get('timestamp')) or datetime.min.replace(tzinfo=timezone.utc), r['alert_id']))
     warnings = list(warnings or [])
@@ -140,6 +171,12 @@ def analyze_records(records, window_minutes=15, warnings=None):
     if any(r.get('event_id') == '4625' and r.get('record_id') is None for r in rows):
         missing.append('补充 EventRecordID；缺少独立记录标识的登录失败不参与次数阈值判断')
     times = [timestamp(r.get('timestamp')) for r in rows if timestamp(r.get('timestamp'))]
+    coverage = analysis_coverage(records, rows, duplicates, conflicts)
+    if coverage['unparsed'] or coverage['missing_time'] or coverage['failure_records_excluded']:
+        warnings.append(f"数据质量：{coverage['unparsed']} 条未识别事件结构，{coverage['missing_time']} 条缺少带时区时间，"
+                        f"{coverage['failure_records_excluded']} 条登录失败缺少关联所需字段或通道不符；缺失项可重叠。")
+    if coverage['unsupported']:
+        warnings.append(f"{coverage['unsupported']} 条记录不在当前 Windows 联合规则覆盖的事件类型内，未据此判断安全。")
     assessment = {'classification': 'suspicious' if findings else 'unknown',
                   'label': '发现异常线索' if findings else '证据不足，待核实',
                   'queue': 'alerts' if findings else 'logs', 'risk_level': 'medium' if findings else 'info',
@@ -148,6 +185,7 @@ def analyze_records(records, window_minutes=15, warnings=None):
                   'findings': [{'quote': '', 'reason': f['reason'], 'record_refs': f['record_refs']} for f in findings],
                   'missing_evidence': missing, 'disposition': 'needs_review'}
     return {'rule_version': RULE_VERSION, 'analyzed_at': datetime.now(timezone.utc).isoformat(),
+            'coverage': coverage,
             'window_minutes': window_minutes, 'records': rows, 'findings': findings, 'assessment': assessment,
             'duplicates_excluded': duplicates, 'conflicts_excluded': conflicts, 'warnings': warnings,
             'time_range': {'start': min(times).isoformat() if times else None, 'end': max(times).isoformat() if times else None},

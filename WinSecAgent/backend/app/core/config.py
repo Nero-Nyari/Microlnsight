@@ -44,7 +44,7 @@ DATA_DIR.mkdir(exist_ok=True)
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DATA_DIR / 'winsecagent.db'}")
 
 # 优先使用 models.json 中的激活模型配置，其次使用环境变量
-_active_model = _load_active_model_config()
+_active_model = None if os.environ.get("WINSEC_TEST_MODE") == "1" else _load_active_model_config()
 
 if _active_model and _active_model.get("api_key"):
     # 使用 models.json 中的配置
@@ -68,6 +68,9 @@ else:
 
 if not _api_key and _llm_type != "local":
     _llm_type = "local"
+
+if os.environ.get("WINSEC_TEST_MODE") == "1":
+    _llm_type, _api_key = "local", ""
 
 DEFAULT_LLM_CONFIG: Dict[str, Any] = {
     "type": _llm_type,

@@ -23,6 +23,23 @@ def records(events):
 
 
 class RuleTests(unittest.TestCase):
+    def test_coverage_reports_duplicates_conflicts_and_missing_metadata(self):
+        events = copy.deepcopy(CASES[5]['events'])
+        events[2]['TimeCreated'] = '2026-09-29T10:02:00'
+        conflict = copy.deepcopy(events[1])
+        conflict['EventData']['TargetUserName'] = 'different'
+        result = analyze_records(records(events + [events[0], conflict, {'message': 'unrecognized'}]))
+        coverage = result['coverage']
+        self.assertEqual(coverage['input_records'], 8)
+        self.assertEqual((coverage['retained'], coverage['duplicates'], coverage['conflicts']), (5, 1, 2))
+        self.assertEqual((coverage['identified'], coverage['unparsed'], coverage['missing_time']), (4, 1, 2))
+        self.assertEqual(coverage['failure_records_excluded'], 1)
+        self.assertEqual(sum(s['retained'] for s in coverage['sources']), 5)
+        from app.agents.report_agent import correlation_report
+        report = correlation_report('coverage', result)
+        self.assertIn('分析范围与解析质量', report)
+        self.assertIn('缺带时区时间 2 条', report)
+
     def test_model_cannot_call_one_failed_logon_brute_force(self):
         from app.agents.assessment import normalize_triage
         raw = json.dumps(CASES[8]['events'][0], ensure_ascii=False)

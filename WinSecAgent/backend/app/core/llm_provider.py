@@ -225,6 +225,11 @@ def _build_config_from_model(model: Dict[str, Any]) -> Dict[str, Any]:
 
 def get_llm_provider(config: Optional[Dict[str, Any]] = None) -> BaseLLMProvider:
     global _provider, _last_models_config
+
+    if os.environ.get("WINSEC_TEST_MODE") == "1":
+        if not isinstance(_provider, LocalLLMProvider):
+            _provider = LocalLLMProvider({"type": "local"})
+        return _provider
     
     # 检查 models.json 是否有更新
     try:
