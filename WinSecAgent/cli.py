@@ -784,6 +784,8 @@ def menu(db, database=DEFAULT_DATABASE) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from terminal_ui import setup_terminal
+    setup_terminal()
     parser = argparse.ArgumentParser(description="WinSecAgent 命令行工作台（Windows / Linux，不启动网页）")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="试用数据库路径")
     commands = parser.add_subparsers(dest="command")

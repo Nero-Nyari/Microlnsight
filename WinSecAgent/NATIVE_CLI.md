@@ -44,6 +44,12 @@ sh start-linux.sh watch --minutes 15 --interval 60
 
 菜单：1 本机日志分析与模拟防护；2 任务、证据与模型追问；3 模型配置；4 本平台合成演示。采集器随当前系统选择，Windows 读取 Security，Linux 读取本机 SSH journal。
 
+从 0.2.2 开始，配置与采集向导支持 **回车采用默认值、0 或 Ctrl+C 取消当前操作**。填错地址、目录或保护名单时，只重填当前一项。任务历史按列表序号选择；打开任务后可连续查看证据、追问和导出，无需复制任务 ID。Linux 交互终端启用行编辑，兼容 Xshell 常见的两种退格键编码。
+
+模型配置流程：选择 **本地 Ollama / DeepSeek API / 其他 OpenAI 兼容服务** → 服务地址 → 密钥方式 → 获取模型列表并按序号选择（也可手动填写）→ 显示名称 → 确认保存。DeepSeek 地址默认 `https://api.deepseek.com`。显示名称只是本机标签，不能填写网址。获取列表仅请求模型服务的 `/api/tags` 或 `/models`，不发送日志，也不代表已验证模型能完成推理。服务不可达时可重试或手动填写模型名称。配置过程中取消不会覆盖原配置。
+
+密钥默认隐藏输入，仅当前进程有效；重启后提问时可重新输入，也可选环境变量方式。请在同一次交互菜单中完成配置和提问。获取模型列表的服务端说明见 [DeepSeek 文档](https://api-docs.deepseek.com/api/list-models/)。
+
 启动脚本可以追加 `models`、`tasks`、`tasks 任务ID`、`ask 任务ID`、`scan`、`watch` 或 `demo`。指定数据位置使用 `--data-dir /path/to/data`（Windows 也支持目录路径），该选项放在子命令前；也可设置 `WINSEC_DATA_DIR`。
 
 默认不调用模型；在菜单明确启用，或执行 `scan --with-model`。本机模型地址是**当前安装机器**的 localhost。Linux 可配置 Linux 本机 Ollama，Windows 可配置 Windows 本机 Ollama；也支持兼容接口和 API。非本机地址须逐次确认；非交互命令还需 `--allow-remote-model`，才发送有限证据摘要。API Key 可隐藏输入，仅存当前交互进程，或通过环境变量读取。程序不捆绑本地模型，无模型服务时仍可运行规则分析。
@@ -90,6 +96,6 @@ sh start-linux.sh update
 
 ### 维护者发布新版本
 
-先提交代码、测试和 `.github/workflows/cli-release.yml` 到仓库，再为通过审核的提交创建递增的版本标签，例如下一版 `cli-v0.2.2`，推送该标签。发布工作流在 Windows/Ubuntu 上验证解析、本机发行包和更新事务；通过后构建两个包及校验清单并创建 GitHub Release。已安装的客户端随后能检查到它。只在本机修改或打包不会产生可下载的线上更新。
+先提交代码、测试和 `.github/workflows/cli-release.yml` 到仓库，再为通过审核的提交创建递增的版本标签，例如下一版 `cli-v0.2.3`，推送该标签。发布工作流在 Windows/Ubuntu 上验证解析、本机发行包和更新事务；通过后构建两个包及校验清单并创建 GitHub Release。已安装的客户端随后能检查到它。只在本机修改或打包不会产生可下载的线上更新。
 
-本地打包：`python build_cli_releases.py --version 0.2.1`。包内版本写入 `edition.json`，不要修改已发布标签下的资产内容；后续变更发布更高版本。更新流程保留本机数据，但未来涉及数据库格式变更的版本仍需单独实现并验证迁移，本样板尚无数据格式迁移机制。
+本地打包：`python build_cli_releases.py --version 0.2.2`。包内版本写入 `edition.json`，不要修改已发布标签下的资产内容；后续变更发布更高版本。更新流程保留本机数据，但未来涉及数据库格式变更的版本仍需单独实现并验证迁移，本样板尚无数据格式迁移机制。

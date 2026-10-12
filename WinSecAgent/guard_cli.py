@@ -1,13 +1,19 @@
 """CLI integration for persisted monitoring tasks and evidence conversations."""
 from __future__ import annotations
 
-import getpass
 import json
+import re
 from pathlib import Path
 import time
 
 from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task
-from guard_models import Profiles, ask, context, is_loopback, validate
+from guard_models import Profiles, ask, context, discover, is_loopback, validate
+from terminal_ui import Cancelled, cancellable, choice, field, read_line
+
+STATES = {'completed_simulation': '模拟分析完成', 'collecting': '采集中', 'analyzing': '分析中',
+          'failed': '失败', 'interrupted': '已中断', 'complete': '完成', 'not_requested': '未启用',
+          'simulated': '已模拟', 'simulation_only': '仅模拟验证', 'protected_skipped': '保护名单内，已跳过',
+          'duplicate_skipped': '相同证据已处理，已跳过'}
 
 
 def resources(database):
@@ -19,7 +25,7 @@ def show(task):
     from cli import _heading, _note, _wrap
     _heading(f"防护任务 {task['id']}", '合成演示数据 · 模拟处置' if task['demo'] else '真实日志 · 模拟处置')
     _note('来源', task['source'])
-    _note('状态', task['status'])
+    _note('状态', STATES.get(task['status'], task['status']))
     if task.get('error'):
         _note('失败原因', task['error'])
     coverage = task.get('coverage', {})
@@ -28,7 +34,9 @@ def show(task):
               f"排除/不支持 {coverage['excluded']}，重复 {coverage['duplicates']}，冲突 {coverage['conflicts']}")
         _note('日志时间 UTC', f"{task['time_range']['start']} → {task['time_range']['end']}")
     for stage in task['stages']:
-        _note('阶段', f"{stage['stage']} → {stage['status']}")
+        label = {'collect': '日志采集', 'rules': '规则分析', 'model': '模型解释',
+                 'policy': '防护策略', 'execute': '模拟执行', 'verify': '模拟验证'}.get(stage['stage'], stage['stage'])
+        _note(label, STATES.get(stage['status'], stage['status']))
     for warning in task.get('warnings', []):
         _note('范围说明', warning)
     if not task['findings']:
@@ -43,7 +51,7 @@ def show(task):
         _note('模型失败', task['model_error'])
     for action in task['actions']:
         _note('模拟方案', f"{action['platform']} / {action['target']} / IP {action['ip']} / {action['ttl_seconds']} 秒")
-        _note('处置状态', f"{action['status']}；{action['reason']}")
+        _note('处置状态', f"{STATES.get(action['status'], action['status'])}；{action['reason']}")
         if action.get('previous_task'):
             _note('相同证据已处理', action['previous_task'])
         _note('验证状态', '未执行真实封禁，也未验证防护效果')
@@ -54,31 +62,78 @@ def show(task):
         _note('恢复计划', action['rollback_plan'])
 
 
+@cancellable
 def configure(profiles):
     from cli import _heading, _note
-    _heading('模型配置', 'API Key 仅存于当前进程；持久配置保存环境变量名，不保存密钥')
+    _heading('模型配置', '回车采用默认值 · 任意一步输入 0 或 Ctrl+C 返回 · 密钥不会写入配置文件')
     data = profiles.load()
-    for name, profile in data['profiles'].items():
-        _note('*' if name == data['active'] else ' ', f"{name} / {profile['kind']} / {profile['model']} / {profile['base_url']}")
-    choice = input('  1 新增/更新并启用  2 切换现有配置  0 返回 > ').strip()
-    if choice == '2':
-        profiles.activate(input('  配置名称：').strip())
+    names = list(data['profiles'])
+    for index, name in enumerate(names, 1):
+        profile = data['profiles'][name]
+        _note(str(index), f"{name} / {profile['model']}" + ('（使用中）' if name == data['active'] else ''))
+    if names and choice('1 添加配置  2 切换已有配置  0 返回', ('1', '2'), '1') == '2':
+        selected = choice('选择配置序号', tuple(str(i) for i in range(1, len(names) + 1)))
+        name = names[int(selected) - 1]
+        profiles.activate(name)
+        _note('已切换', name)
         return
-    if choice != '1':
-        return
-    name = input('  配置名称（例如 local 或 api）：').strip()
-    kind = {'1': 'ollama', '2': 'openai'}.get(input('  1 Ollama  2 OpenAI 兼容接口（本地或 API）> ').strip())
-    if not kind:
-        raise ValueError('请选择 1 或 2')
-    default = 'http://127.0.0.1:11434' if kind == 'ollama' else 'http://127.0.0.1:8000/v1'
-    base = input(f'  服务地址 [{default}]：').strip() or default
-    model = input('  模型名称（与服务端一致）：').strip()
-    env = input('  API Key 环境变量名（无密钥可回车）：').strip()
-    profile = validate(dict(kind=kind, base_url=base, model=model, key_env=env))
-    key = getpass.getpass('  本次会话 API Key（隐藏输入；无/已设环境变量可回车）：') if kind == 'openai' else ''
-    profiles.put(name, profile, key)
-    _note('已启用', f'{name}；实际连接将在提问时验证')
-    if key:
+    _note('第 1 步 / 3', '选择模型服务')
+    print('  1 本地 Ollama\n  2 DeepSeek API\n  3 其他 OpenAI 兼容服务（本地或云端）\n  0 返回')
+    service = choice('服务序号', ('1', '2', '3'))
+    kind, default_base, default_name = {
+        '1': ('ollama', 'http://127.0.0.1:11434', 'ollama'),
+        '2': ('openai', 'https://api.deepseek.com', 'deepseek'),
+        '3': ('openai', 'http://127.0.0.1:8000/v1', 'custom'),
+    }[service]
+    def check_base(value):
+        return validate(dict(kind=kind, base_url=value, model='pending'))['base_url']
+    base = field('服务地址（回车使用默认地址）', default_base, validate=check_base)
+    profile = dict(kind=kind, base_url=base, model='', key_env='')
+    key = ''
+    if kind == 'openai':
+        mode = choice('密钥：1 隐藏输入（仅本次）  2 环境变量  3 无密钥', ('1', '2', '3'), '1')
+        if mode == '1':
+            key = field('粘贴 API Key（输入不显示，0 返回）', secret=True)
+        elif mode == '2':
+            def check_env(value):
+                return validate({**profile, 'model': 'pending', 'key_env': value})['key_env']
+            profile['key_env'] = field('已设置的环境变量名', validate=check_env)
+            key = profiles.key('', profile)
+            if not key:
+                _note('提示', '此环境变量当前为空；提问前会提示补充密钥')
+    _note('第 2 步 / 3', '选择服务中的模型；获取列表只发送认证信息，不发送日志')
+    while True:
+        mode = choice('1 获取模型列表并选择  2 手动填写模型名称', ('1', '2'), '1')
+        if mode == '2':
+            profile['model'] = field('模型名称（与服务端一致）')
+            break
+        try:
+            _note('正在连接', base)
+            models = discover(profile, key)
+        except RuntimeError as exc:
+            _note('未取得模型列表', exc)
+            continue
+        for index, model in enumerate(models, 1):
+            _note(str(index), model)
+        selected = choice('模型序号', tuple(str(i) for i in range(1, len(models) + 1)))
+        profile['model'] = models[int(selected) - 1]
+        _note('连接结果', '模型列表读取成功；实际回答将在提问时验证')
+        break
+    _note('第 3 步 / 3', '检查并保存配置')
+    def check_name(value):
+        if not re.fullmatch(r'[\w-]{1,40}', value):
+            raise ValueError('这是显示名称，请使用 1–40 个字母、数字、中文或下划线/短横线；不要填网址')
+        return value
+    name = field('显示名称（不是服务地址）', default_name, validate=check_name)
+    _note('服务', f"{kind} / {base}")
+    _note('模型', profile['model'])
+    _note('密钥', f"环境变量 {profile['key_env']}" if profile['key_env'] else '本次会话已输入' if key else '未设置')
+    if name in data['profiles']:
+        _note('已有同名配置', f'保存将替换 {name}，输入 0 取消可保留原配置')
+    choice('1 保存并启用  0 取消', ('1',), '1')
+    profiles.put(name, profile, '' if profile['key_env'] else key)
+    _note('已启用', name)
+    if key and not profile['key_env']:
         _note('密钥', '本次进程退出后清除；下次可重新输入，或设置所选环境变量')
 
 
@@ -92,93 +147,141 @@ def consent_for(profiles, task=None):
     if task:
         preview = context(task)
         _note('本次证据条数', len(preview['evidence']))
-        if input('  先查看发送的证据 JSON？输入 y 查看：').strip().lower() == 'y':
+        if read_line('  先查看发送的证据 JSON？输入 y 查看：').lower() == 'y':
             _note('发送证据预览', json.dumps(preview, ensure_ascii=False))
-    return input('  允许本次提问发送到此地址？输入 y 确认：').strip().lower() == 'y'
+    return read_line('  允许本次提问发送到此地址？输入 y 确认：').lower() == 'y'
 
 
+def prepare_key(profiles):
+    name, profile = profiles.active()
+    if profile['kind'] == 'openai' and not profiles.key(name, profile):
+        from cli import _note
+        _note('当前没有 API Key', '可隐藏输入本次会话密钥；无密钥的本地服务直接回车')
+        key = field('API Key（隐藏输入，0 返回）', allow_empty=True, secret=True)
+        if key:
+            profiles.session_keys[name] = key
+
+
+@cancellable
 def chat(store, profiles, task_id):
     from cli import _heading, _note
     task = store.get(task_id)
-    _heading(f'围绕任务 {task_id} 追问', '回答单独保存；不会改写规则结论或执行命令。输入 /back 返回')
+    _heading('围绕当前任务追问', '输入 0 或 /back 返回；回答不会改写规则结论或执行命令')
+    try:
+        prepare_key(profiles)
+    except ValueError as exc:
+        _note('需要配置模型', exc)
+        return
     for item in store.history(task_id, 4):
         _note('你' if item['role'] == 'user' else '模型', item['content'])
     while True:
-        question = input('  你 > ').strip()
-        if question in ('/back', '退出', ''):
+        question = read_line('  你 > ')
+        if question in ('0', '/back', '退出', ''):
             return
-        if not consent_for(profiles, task):
-            _note('已取消', '未发送请求')
-            continue
-        _note('模型', ask(store, profiles, task_id, question, consent=True))
+        try:
+            if not consent_for(profiles, task):
+                _note('已取消', '未发送请求')
+                continue
+            _note('正在分析', '等待模型回答…')
+            _note('模型', ask(store, profiles, task_id, question, consent=True))
+        except (ValueError, RuntimeError, OSError) as exc:
+            _note('本次提问失败', exc)
+            _note('继续操作', '可重新提问，或输入 0 返回；任务证据仍在本机')
 
 
+@cancellable
+def task_detail(store, profiles, task):
+    from cli import _note
+    task_id = task['id']
+    show(task)
+    while True:
+        action = choice('1 向模型提问  2 查看证据  3 导出完整 JSON  0 返回', ('1', '2', '3'))
+        if action == '1':
+            chat(store, profiles, task_id)
+        elif action == '2':
+            for row in task.get('events', [])[:100]:
+                _note(row['ref'], row['raw'])
+                if row.get('raw_truncated'):
+                    _note('原文截断', f"仅保存前 4096 字符；完整记录 SHA256：{row['raw_sha256']}")
+            _note('证据展示范围', '最多显示 100 条；完整快照可导出')
+        else:
+            try:
+                def export_path(value):
+                    output = Path(value.strip('"').strip("'")).expanduser()
+                    if output.exists():
+                        raise ValueError('目标已存在；请换一个文件名以避免覆盖')
+                    if not output.parent.is_dir():
+                        raise ValueError('父目录不存在，请填写已有目录中的文件路径')
+                    return output
+                output = field('导出文件路径（包含 .json 文件名）', validate=export_path)
+                with output.open('x', encoding='utf-8') as stream:
+                    json.dump(dict(task=task, conversation=store.history(task_id, 1000)), stream, ensure_ascii=False, indent=2)
+                _note('已导出', output)
+            except Cancelled:
+                _note('已取消', '返回任务详情')
+            except OSError as exc:
+                _note('导出失败', exc)
+
+
+@cancellable
 def task_menu(store, profiles):
     from cli import _heading, _note
-    _heading('防护任务历史', '退出程序后仍可查看；采集失败也会留档')
-    for task in store.recent():
-        _note(task['id'], f"{task['created']} | {task['source']} | {task['status']} | 线索 {len(task['findings'])}")
-    task_id = input('  输入任务 ID 查看详情（回车返回）：').strip()
-    if not task_id:
-        return
-    task = store.get(task_id)
-    show(task)
-    choice = input('  1 向模型提问  2 查看证据  3 导出完整 JSON  0 返回 > ').strip()
-    if choice == '1':
-        chat(store, profiles, task_id)
-    elif choice == '2':
-        for row in task.get('events', [])[:100]:
-            _note(row['ref'], row['raw'])
-            if row.get('raw_truncated'):
-                _note('原文截断', f"仅保存前 4096 字符；完整记录 SHA256：{row['raw_sha256']}")
-        _note('证据展示范围', '最多显示 100 条；完整快照可导出')
-    elif choice == '3':
-        raw = input('  导出文件路径：').strip().strip('"').strip("'")
-        if not raw:
+    while True:
+        _heading('防护任务历史', '输入列表序号打开任务 · 0 返回主菜单')
+        tasks = store.recent()
+        if not tasks:
+            _note('暂无任务', '从主菜单选择 1 分析本机日志，或选择 4 体验合成演示')
             return
-        output = Path(raw).expanduser()
-        if output.exists():
-            raise ValueError('目标已存在；请换一个文件名以避免覆盖')
-        # No implicit parent creation: a wrong directory should be visible.
-        with output.open('x', encoding='utf-8') as stream:
-            json.dump(dict(task=task, conversation=store.history(task_id, 1000)), stream, ensure_ascii=False, indent=2)
-        _note('已导出', output)
+        for index, task in enumerate(tasks, 1):
+            status = STATES.get(task['status'], task['status'])
+            _note(str(index), f"{task['created']} | {task['source']} | {status} | 线索 {len(task['findings'])}")
+        selected = choice('任务序号', tuple(str(i) for i in range(1, len(tasks) + 1)))
+        task_detail(store, profiles, store.get(tasks[int(selected) - 1]['id']))
 
 
+@cancellable
 def wizard(store, profiles):
     import platform
     from cli import _heading, _note
+    from guard import plan
     system = platform.system().lower()
     if system not in ('windows', 'linux'):
         raise ValueError('本机版本只支持 Windows 或 Linux')
-    _heading(f'{system.title()} 本机采集与模拟防护', '日志在当前主机读取和分析；所有处置仅模拟')
+    _heading(f'{system.title()} 本机采集与模拟防护', '回车采用默认值 · 0 返回 · 所有处置仅模拟')
     print(f'  1 读取本机 {system.title()} 日志（默认）\n  2 本机导出目录\n  3 本平台合成演示')
-    choice = input('  来源 [1-3] > ').strip() or '1'
-    if choice == '1':
+    source_choice = choice('来源', ('1', '2', '3'), '1')
+    if source_choice == '1':
         source = f'{system}-local'
         collector, demo = (collect_windows if system == 'windows' else collect_linux), False
-    elif choice == '2':
-        directory = Path(input('  导出目录：').strip().strip('"').strip("'")).resolve()
+    elif source_choice == '2':
+        def check_directory(value):
+            directory = Path(value.strip('"').strip("'")).expanduser().resolve()
+            if not directory.is_dir():
+                raise ValueError('目录不存在，请检查路径')
+            return directory
+        directory = field('导出目录', validate=check_directory)
         source, collector, demo = f'export:{directory}', lambda: collect_export(directory), False
-    elif choice == '3':
-        source, collector, demo = f'demo:{system}', lambda: demo_events(system), True
     else:
-        raise ValueError('请选择 1–3')
-    protected = input('  管理 IP / CIDR 保护名单（逗号分隔；可回车）：').strip()
-    protected = [value.strip() for value in protected.split(',') if value.strip()]
-    from guard import plan
-    plan([], protected)  # Validate before collection.
-    use_model = input('  本轮调用已配置模型解释证据？输入 y 启用：').strip().lower() == 'y'
+        source, collector, demo = f'demo:{system}', lambda: demo_events(system), True
+    def check_protected(value):
+        protected = [item.strip() for item in value.split(',') if item.strip()]
+        plan([], protected)
+        return protected
+    protected = field('管理 IP / CIDR 保护名单（逗号分隔；可回车）', allow_empty=True, validate=check_protected)
     analyst = None
-    if use_model:
-        profiles.active()  # Fail before collecting if not configured.
-        def analyst(task_id):
-            if not consent_for(profiles, store.get(task_id)):
-                raise ValueError('用户未同意发送证据，模型步骤已取消')
-            return ask(store, profiles, task_id, '解释异常线索并引用证据，给出下一步核查方法。', consent=True)
+    if profiles.load()['active']:
+        use_model = choice('分析方式：1 规则分析  2 规则 + 模型解释', ('1', '2'), '1') == '2'
+        if use_model:
+            prepare_key(profiles)
+            def analyst(task_id):
+                if not consent_for(profiles, store.get(task_id)):
+                    raise ValueError('用户未同意发送证据，模型步骤已取消')
+                return ask(store, profiles, task_id, '解释异常线索并引用证据，给出下一步核查方法。', consent=True)
+    else:
+        _note('分析方式', '规则分析；尚未配置模型，可稍后在主菜单 3 配置并追问')
+    _note('正在分析', '读取日志、匹配规则并生成模拟处置方案…')
     task = run_task(store, source, collector, protected=protected, demo=demo, analyst=analyst)
-    show(task)
-    _note('查看或追问', f"进入防护任务历史 → {task['id']}")
+    task_detail(store, profiles, task)
 
 
 def add_commands(commands):

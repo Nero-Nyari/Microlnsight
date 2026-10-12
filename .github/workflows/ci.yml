@@ -26,6 +26,9 @@ jobs:
       - name: Check update transactions
         working-directory: WinSecAgent
         run: python -X utf8 -m unittest discover -s backend/tests -p test_cli_update.py -v
+      - name: Check interactive terminal flows
+        working-directory: WinSecAgent
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_terminal_ui.py -v
 
   backend:
     runs-on: windows-latest

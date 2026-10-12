@@ -10,7 +10,7 @@ from cli_update import VERSION, version as parse_version
 
 ROOT = Path(__file__).resolve().parent
 COMMON = ('agent.py', 'cli.py', 'guard.py', 'guard_cli.py', 'guard_models.py',
-          'server_logs.py', 'install_cli.py', 'NATIVE_CLI.md', 'cli_update.py', 'launch_cli.py')
+          'server_logs.py', 'install_cli.py', 'NATIVE_CLI.md', 'cli_update.py', 'launch_cli.py', 'terminal_ui.py')
 WINDOWS = ('backend/app/__init__.py', 'backend/app/agents/__init__.py',
            'backend/app/agents/event_context.py', 'backend/app/services/__init__.py',
            'backend/app/services/log_reader.py')

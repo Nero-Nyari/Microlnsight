@@ -81,11 +81,40 @@ class Profiles:
         data = self.load()
         name = data['active']
         if not name or name not in data['profiles']:
-            raise ValueError('尚未配置 CLI 模型，请先选择菜单 10')
+            raise ValueError('尚未配置模型，请进入“模型配置与选择”添加一个服务')
         return name, validate(data['profiles'][name])
 
     def key(self, name, profile):
         return self.session_keys.get(name) or os.environ.get(profile.get('key_env', ''), '')
+
+
+def discover(profile, key=''):
+    """List available model IDs; no log or conversation content is sent."""
+    import requests
+    profile = validate({**profile, 'model': profile.get('model') or 'discovery'})
+    suffix = '/api/tags' if profile['kind'] == 'ollama' else '/models'
+    headers = {'Authorization': 'Bearer ' + key} if key else {}
+    try:
+        with requests.get(profile['base_url'].rstrip('/') + suffix, headers=headers,
+                          timeout=(5, 15), allow_redirects=False, stream=True) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f'模型列表读取失败（HTTP {response.status_code}），可重试或手动填写模型名称')
+            content = bytearray()
+            for chunk in response.iter_content(8192):
+                content.extend(chunk)
+                if len(content) > 1024 * 1024:
+                    raise RuntimeError('模型列表过大，已停止读取')
+            payload = json.loads(content)
+        rows = payload['models'] if profile['kind'] == 'ollama' else payload['data']
+        names = [r.get('name') if profile['kind'] == 'ollama' else r.get('id') for r in rows]
+        names = list(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
+        if not names:
+            raise RuntimeError('服务没有返回可用模型；请检查是否已经安装或开通模型')
+        return names[:100]
+    except requests.RequestException as exc:
+        raise RuntimeError('连接模型服务失败，可重试或手动填写模型名称') from exc
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise RuntimeError('模型列表格式不兼容，可手动填写模型名称') from exc
 
 
 def context(task):
