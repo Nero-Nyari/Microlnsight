@@ -1,6 +1,7 @@
 """Small, dependency-free helpers for ordinary SSH/Windows terminals."""
 from functools import wraps
 import getpass
+import re
 import sys
 import warnings
 
@@ -82,3 +83,116 @@ def cancellable(function):
             from cli import _note
             _note('已返回', '取消当前操作')
     return wrapped
+
+
+def _inline(value):
+    """Readable Markdown text; keep punctuation inside inline code intact."""
+    parts = re.split(r'(`+[^`]+`+)', value)
+    for index, part in enumerate(parts):
+        if part.startswith('`') and part.endswith('`'):
+            parts[index] = part.strip('`')
+        else:
+            part = re.sub(r'\*\*(.+?)\*\*', r'\1', part)
+            part = re.sub(r'__(.+?)__', r'\1', part)
+            part = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', part)
+            parts[index] = part
+    return ''.join(parts)
+
+
+def _table_cells(line):
+    # Pipes escaped or inside inline code are part of the cell, not separators.
+    cells, cell, code = [], [], False
+    escaped = False
+    for char in line.strip().strip('|'):
+        if escaped:
+            cell.append(char)
+            escaped = False
+        elif char == '\\':
+            cell.append(char)
+            escaped = True
+        elif char == '`':
+            code = not code
+            cell.append(char)
+        elif char == '|' and not code:
+            cells.append(''.join(cell).strip())
+            cell = []
+        else:
+            cell.append(char)
+    cells.append(''.join(cell).strip())
+    return cells
+
+
+def model_answer(value, title='模型解释（需核实）'):
+    """Render model prose as terminal blocks; never interpret code or ANSI escapes.
+
+    The original answer remains untouched in storage and JSON exports.
+    Code wraps with a visible continuation marker, never a fabricated shell '\\'.
+    """
+    from cli import _heading, _wrap
+    _heading(title)
+    last_blank = False
+    def emit(value, indent='', continuation=None):
+        nonlocal last_blank
+        _wrap(value, indent, continuation)
+        last_blank = False
+    def gap():
+        nonlocal last_blank
+        if not last_blank:
+            print()
+            last_blank = True
+    lines = str(value).replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    fence = None
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(r'^\s{0,3}(`{3,}|~{3,})(.*)$', line)
+        if fence:
+            if match and match[1][0] == fence[0] and len(match[1]) >= len(fence) and not match[2].strip():
+                gap()
+                fence = None
+            else:
+                # Preserve code indentation, Markdown-looking operators and comments.
+                emit(line, '    │ ', '    ↪ ')
+            index += 1
+            continue
+        if match:
+            fence = match[1]
+            gap()
+            emit('代码 / 命令（仅展示；↪ 表示显示续行，复制请使用导出原文）', '  ')
+            if match[2].strip():
+                emit('语言：' + match[2].strip(), '  ')
+            index += 1
+            continue
+        # Display Markdown table rows vertically, so long Chinese cells stay readable.
+        if '|' in line and index + 1 < len(lines):
+            separators = _table_cells(lines[index + 1])
+            headers = _table_cells(line)
+            if len(headers) >= 2 and len(headers) == len(separators) and all(re.fullmatch(r':?-{3,}:?', cell) for cell in separators):
+                index += 2
+                while index < len(lines) and '|' in lines[index] and lines[index].strip():
+                    row = _table_cells(lines[index])
+                    if len(row) != len(headers):
+                        break
+                    gap()
+                    for header, cell in zip(headers, row):
+                        emit(f'{_inline(header)}：{_inline(cell)}', '  ', '    ')
+                    index += 1
+                gap()
+                continue
+        heading = re.match(r'^\s{0,3}#{1,6}\s+(.+?)\s*#*$', line)
+        bullet = re.match(r'^(\s*)([-+*]|\d+[.)])\s+(.+)$', line)
+        if not line.strip():
+            gap()
+        elif heading:
+            gap()
+            emit('【' + _inline(heading[1]) + '】', '  ')
+        elif re.fullmatch(r'\s*(?:-{3,}|\*{3,}|_{3,})\s*', line):
+            gap()
+        elif bullet:
+            indent = '  ' + ' ' * min(len(bullet[1]), 8)
+            marker = '•' if bullet[2] in ('-', '+', '*') else bullet[2]
+            emit(_inline(bullet[3]), indent + marker + ' ', indent + '  ')
+        else:
+            emit(_inline(line), '  ', '    ')
+        index += 1
+    gap()

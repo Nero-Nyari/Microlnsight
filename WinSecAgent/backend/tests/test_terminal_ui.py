@@ -33,6 +33,66 @@ class TerminalTests(unittest.TestCase):
             guard_cli.configure(self.profiles)
         return output.getvalue(), discover
 
+    def test_model_answer_preserves_blocks_commands_and_converts_table(self):
+        answer = '''# 分析结论
+
+确认两组线索，**仍需核实**。
+
+## 证据
+- 来源：`192.0.2.1`，引用 `ssh:57`
+- 失败次数：8
+
+| 项目 | 说明 |
+| --- | --- |
+| 已知 | 多次失败 |
+| 未知 | 是否成功登录 |
+
+### 下一步
+```bash
+# 保留命令注释与换行
+journalctl -u ssh.service --since "1 hour ago"
+printf '**literal**\\n' | cat
+```
+仅供核查。
+'''
+        with redirect_stdout(io.StringIO()) as output:
+            terminal_ui.model_answer(answer)
+        rendered = output.getvalue()
+        self.assertIn('【分析结论】', rendered)
+        self.assertIn('确认两组线索，仍需核实。', rendered)
+        self.assertNotIn('**仍需核实**', rendered)
+        self.assertNotIn('| --- |', rendered)
+        self.assertIn('项目：已知\n', rendered)
+        self.assertIn('说明：多次失败\n', rendered)
+        self.assertIn('│ # 保留命令注释与换行\n', rendered)
+        self.assertIn('│ journalctl -u ssh.service --since "1 hour ago"\n', rendered)
+        self.assertIn("│ printf '**literal**\\n' | cat\n", rendered)
+        self.assertNotIn('```', rendered)
+
+    def test_narrow_model_output_wraps_cjk_and_escapes_terminal_controls(self):
+        import cli
+        answer = '# 核查\n\n' + '中文证据 ' * 30 + '\n```sh\n' + 'journalctl ' + 'x' * 80 + '\n\x1b[2J\x1b]52;c;payload\x07\n```'
+        with patch('cli._width', return_value=40), patch.dict(os.environ, {'NO_COLOR': '1'}), \
+                redirect_stdout(io.StringIO()) as output:
+            terminal_ui.model_answer(answer)
+        rendered = output.getvalue()
+        self.assertNotIn('\x1b', rendered)
+        self.assertNotIn('\x07', rendered)
+        self.assertIn('↪ ', rendered)
+        for line in rendered.splitlines():
+            self.assertLessEqual(cli._cell_width(line), 40, line)
+
+    def test_saved_task_model_explanation_uses_blocks_without_changing_original(self):
+        store = guard.TaskStore(Path(self.temp.name) / 'tasks.db')
+        task = guard.run_task(store, 'demo:linux', lambda: guard.demo_events('linux'), demo=True)
+        task['model_answer'] = '# 结论\n\n需要核查。\n\n## 证据\n- `demo:0`'
+        store.save(task)
+        with redirect_stdout(io.StringIO()) as output:
+            guard_cli.show(store.get(task['id']))
+        self.assertIn('【结论】\n', output.getvalue())
+        self.assertIn('【证据】\n', output.getvalue())
+        self.assertEqual(store.get(task['id'])['model_answer'], task['model_answer'])
+
     def test_deepseek_preset_list_selection_and_secret_never_saved_or_printed(self):
         output, discover = self.configure(['2', '', '', '', '2', '', ''])
         name, profile = self.profiles.active()

@@ -8,7 +8,7 @@ import time
 
 from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task
 from guard_models import Profiles, ask, context, deepseek, discover, is_loopback, validate
-from terminal_ui import Cancelled, cancellable, choice, field, read_line
+from terminal_ui import Cancelled, cancellable, choice, field, model_answer, read_line
 
 STATES = {'completed_simulation': '模拟分析完成', 'collecting': '采集中', 'analyzing': '分析中',
           'failed': '失败', 'interrupted': '已中断', 'complete': '完成', 'not_requested': '未启用',
@@ -46,7 +46,7 @@ def show(task):
         _note('依据', f"{finding['host']} / {finding['account']} / {finding['ip']}，5 分钟内 {finding['failure_count']} 次失败")
         _note('证据', ', '.join(finding['refs'][:12]) + (' …' if len(finding['refs']) > 12 else ''))
     if task.get('model_answer'):
-        _note('模型解释（需核实）', task['model_answer'])
+        model_answer(task['model_answer'])
     if task.get('model_error'):
         _note('模型失败', task['model_error'])
     show_diagnostic(task)
@@ -228,7 +228,10 @@ def chat(store, profiles, task_id):
         _note('需要配置模型', exc)
         return
     for item in store.history(task_id, 4):
-        _note('你' if item['role'] == 'user' else '模型', item['content'])
+        if item['role'] == 'user':
+            _note('你', item['content'])
+        else:
+            model_answer(item['content'], '历史模型回答（需核实）')
     session_destination = None
     while True:
         question = read_line('  你 > ')
@@ -248,7 +251,7 @@ def chat(store, profiles, task_id):
                 if consent == 'session':
                     session_destination = destination
             _note('正在分析', '等待模型回答…')
-            _note('模型', ask(store, profiles, task_id, question, consent=True))
+            model_answer(ask(store, profiles, task_id, question, consent=True), '模型回答（需核实）')
         except (ValueError, RuntimeError, OSError) as exc:
             _note('本次提问失败', exc)
             task = store.get(task_id)
