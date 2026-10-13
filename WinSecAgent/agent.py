@@ -20,7 +20,7 @@ def native_platform():
 
 
 def _main(argv=None):
-    from terminal_ui import Cancelled, read_line, setup_terminal
+    from terminal_ui import Cancelled, menu_group, read_line, setup_terminal
     setup_terminal()
     from guard_cli import dispatch, resources, configure, wizard, task_menu, show
     from guard import demo_events, run_task
@@ -78,7 +78,10 @@ def _main(argv=None):
                 _note('本机数据目录', database.parent)
                 active = profiles.load()
                 _note('当前模型', (active['active'] + ' / ' + active['profiles'][active['active']]['model']) if active['active'] else '尚未配置，可先运行规则分析')
-                print('  1 本机日志分析与防护建议\n  2 任务、证据与模型追问\n  3 模型配置与选择\n  4 本平台合成演示\n  5 检查更新\n  6 更新并退出\n  0 退出')
+                menu_group('分析与核查', [('1', '本机日志分析与防护建议'), ('2', '任务、证据与模型追问'), ('4', '本平台合成演示')])
+                menu_group('模型与维护', [('3', '模型配置与选择'), ('5', '检查更新'), ('6', '更新并退出')])
+                menu_group('结束', [('0', '退出')])
+                print()
                 choice = read_line('  选择 [0-6] > ')
                 try:
                     if choice == '0':

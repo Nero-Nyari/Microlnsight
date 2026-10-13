@@ -164,6 +164,7 @@ def discover(profile, key=''):
 
 
 def context(task):
+    from guard import task_assessment
     refs = {ref for finding in task.get('findings', []) for ref in finding['refs']}
     events = task.get('events', [])
     chosen = [r for r in events if r['ref'] in refs]
@@ -171,7 +172,7 @@ def context(task):
     # Reserve space for successful logons as well as failure samples.
     chosen = (chosen[:15] + chosen[-15:]) if len(chosen) > 30 else chosen
     payload = dict(task_id=task['id'], source=task['source'], demo=task['demo'], mode='advice_only', actual_system_change=False,
-                   coverage=task.get('coverage'), time_range=task.get('time_range'),
+                   coverage=task.get('coverage'), time_range=task.get('time_range'), assessment=task_assessment(task),
                    findings=[{k: v for k, v in f.items() if k not in ('identities', 'refs')} | {'refs': f['refs'][:10]}
                              for f in task.get('findings', [])[:10]],
                    warnings=task.get('warnings', [])[:10], evidence=[])

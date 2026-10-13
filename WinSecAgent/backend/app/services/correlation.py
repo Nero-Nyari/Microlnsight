@@ -9,7 +9,7 @@ from sqlalchemy.orm import joinedload
 from app import models
 from app.agents.event_context import extract_event_context
 
-RULE_VERSION = 1
+RULE_VERSION = 2
 FAILURE_THRESHOLD = 5
 FAILURE_WINDOW_SECONDS = 300
 MAX_CANDIDATES = 5000
@@ -71,6 +71,18 @@ def service_binary(command):
     return match.group(1) if match else command.split(' ', 1)[0]
 
 
+def rule_eligible(r):
+    if r.get('platform') != 'Windows':
+        return False
+    kind = (str(r.get('event_id')), str(r.get('channel') or '').casefold())
+    if kind in (('4625', 'security'), ('4624', 'security')):
+        return bool(r.get('record_id') is not None and r.get('computer') and r.get('username')
+                    and timestamp(r.get('timestamp')) and source_ip(r.get('source_ip')))
+    if kind in (('4697', 'security'), ('7045', 'system')):
+        return bool(r.get('service_path') and r.get('service_start') is not None)
+    return False
+
+
 def analysis_coverage(records, rows, duplicates, conflicts):
     supported = {('4625', 'security'), ('4624', 'security'), ('4697', 'security'), ('7045', 'system')}
     sources = {}
@@ -90,7 +102,9 @@ def analysis_coverage(records, rows, duplicates, conflicts):
         else:
             info['missing_time'] += 1
     identified = sum(info['identified'] for info in sources.values())
-    return dict(input_records=len(records), retained=len(rows), identified=identified,
+    eligible = sum(rule_eligible(r) for r in rows)
+    return dict(input_records=len(records), retained=len(rows), identified=identified, eligible_records=eligible,
+                scope_incomplete=bool(conflicts or eligible < len(rows) or any(not timestamp(r.get('timestamp')) for r in rows)),
                 unparsed=len(rows) - identified, duplicates=duplicates, conflicts=conflicts,
                 unsupported=sum(info['unsupported'] for info in sources.values()),
                 missing_time=sum(info['missing_time'] for info in sources.values()),
@@ -101,7 +115,7 @@ def analysis_coverage(records, rows, duplicates, conflicts):
                 sources=list(sources.values()))
 
 
-def analyze_records(records, window_minutes=15, warnings=None):
+def analyze_records(records, window_minutes=15, warnings=None, *, scope_incomplete=False):
     records = list(records)
     rows, duplicates, conflicts = deduplicate(records)
     rows.sort(key=lambda r: (timestamp(r.get('timestamp')) or datetime.min.replace(tzinfo=timezone.utc), r['alert_id']))
@@ -172,16 +186,25 @@ def analyze_records(records, window_minutes=15, warnings=None):
         missing.append('补充 EventRecordID；缺少独立记录标识的登录失败不参与次数阈值判断')
     times = [timestamp(r.get('timestamp')) for r in rows if timestamp(r.get('timestamp'))]
     coverage = analysis_coverage(records, rows, duplicates, conflicts)
+    coverage['scope_incomplete'] = coverage['scope_incomplete'] or scope_incomplete
+    status = 'findings' if findings else 'no_findings' if coverage['eligible_records'] else 'insufficient_data'
+    if status == 'insufficient_data':
+        missing = ['没有符合当前规则要求的记录；请补充受支持的日志类型及必需字段'] + missing[1:]
     if coverage['unparsed'] or coverage['missing_time'] or coverage['failure_records_excluded']:
         warnings.append(f"数据质量：{coverage['unparsed']} 条未识别事件结构，{coverage['missing_time']} 条缺少带时区时间，"
                         f"{coverage['failure_records_excluded']} 条登录失败缺少关联所需字段或通道不符；缺失项可重叠。")
     if coverage['unsupported']:
         warnings.append(f"{coverage['unsupported']} 条记录不在当前 Windows 联合规则覆盖的事件类型内，未据此判断安全。")
     assessment = {'classification': 'suspicious' if findings else 'unknown',
-                  'label': '发现异常线索' if findings else '证据不足，待核实',
+                  'status': status, 'scope_incomplete': coverage['scope_incomplete'],
+                  'label': ('发现待核查线索' if findings else '数据不足，无法判断' if status == 'insufficient_data'
+                            else '在已分析范围内未发现规则线索'),
                   'queue': 'alerts' if findings else 'logs', 'risk_level': 'medium' if findings else 'info',
                   'confidence': 0.0, 'event_type': 'Windows 本地联合分析',
-                  'reasoning': '；'.join(f['title'] for f in findings) if findings else '本地规则未发现明确异常线索；这不等于确认主机安全。',
+                  'reasoning': ('；'.join(f['title'] for f in findings) if findings else
+                                '没有符合当前规则要求的记录，尚无法判断；请核对日志格式、类型及必要字段。'
+                                if status == 'insufficient_data' else
+                                f"已对 {coverage['eligible_records']} 条符合条件的记录运行本地规则，未发现规则线索；这不等于确认主机安全。"),
                   'findings': [{'quote': '', 'reason': f['reason'], 'record_refs': f['record_refs']} for f in findings],
                   'missing_evidence': missing, 'disposition': 'needs_review'}
     return {'rule_version': RULE_VERSION, 'analyzed_at': datetime.now(timezone.utc).isoformat(),
@@ -209,7 +232,7 @@ def collect_related(db, incident, window_minutes=15):
         t = timestamp(r.get('timestamp'))
         if r.get('platform') == 'Windows' and r['is_demo'] == seed['is_demo'] and str(r.get('computer') or '').casefold() == str(seed['computer']).casefold() and t and abs((t - time).total_seconds()) <= window_minutes * 60:
             selected.append(r)
-    return analyze_records(selected, window_minutes, warnings)
+    return analyze_records(selected, window_minutes, warnings, scope_incomplete=len(candidates) > MAX_CANDIDATES)
 
 
 def save_analysis(db, incident, window_minutes):

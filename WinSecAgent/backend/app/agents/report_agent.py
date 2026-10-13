@@ -67,6 +67,10 @@ def correlation_report(title, result):
                       f"结构已识别 {coverage['identified']} 条；未识别 {coverage['unparsed']} 条；缺带时区时间 {coverage['missing_time']} 条；规则未覆盖 {coverage['unsupported']} 条。",
                       f"登录失败中有 {coverage['failure_records_excluded']} 条因缺少必要字段或通道不符，未参与次数阈值判断。",
                       '缺少时间、缺少字段和规则未覆盖是独立维度，可重叠；记录保留不等于所有规则均可分析。'])
+        if 'eligible_records' in coverage:
+            lines.append(f"符合当前规则要求：{coverage['eligible_records']} 条。")
+        if coverage.get('scope_incomplete'):
+            lines.append('分析范围不完整：部分内容无法参与分析，或原始采集范围尚无法核实。')
         if 'selected_total' in coverage:
             lines.append(f"所选范围 {coverage['selected_total']} 条；超限跳过 {coverage['skipped_limit']} 条。")
         for source in coverage['sources']:

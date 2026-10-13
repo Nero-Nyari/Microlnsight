@@ -6,9 +6,9 @@ import re
 from pathlib import Path
 import time
 
-from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task
+from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task, task_assessment
 from guard_models import Profiles, ask, context, deepseek, discover, is_loopback, validate
-from terminal_ui import Cancelled, cancellable, choice, field, model_answer, read_line
+from terminal_ui import Cancelled, busy, cancellable, choice, field, model_answer, read_line, section, status_line
 
 STATES = {'completed_simulation': '分析完成（仅提供建议）', 'collecting': '采集中', 'analyzing': '分析中',
           'failed': '失败', 'interrupted': '已中断', 'complete': '完成', 'not_requested': '未启用',
@@ -25,7 +25,7 @@ def show(task):
     from cli import _heading, _note, _wrap
     _heading(f"防护任务 {task['id']}", '合成演示数据 · 防护建议（尚未执行）' if task['demo'] else '真实日志 · 防护建议（尚未执行）')
     _note('来源', task['source'])
-    _note('状态', STATES.get(task['status'], task['status']))
+    status_line('任务', STATES.get(task['status'], task['status']), task['status'])
     if task.get('error'):
         _note('失败原因', task['error'])
     coverage = task.get('coverage', {})
@@ -33,16 +33,25 @@ def show(task):
         _note('数据范围', f"输入 {coverage['input']}，有效登录记录 {coverage['retained']}，"
               f"排除/不支持 {coverage['excluded']}，重复 {coverage['duplicates']}，冲突 {coverage['conflicts']}")
         _note('日志时间 UTC', f"{task['time_range']['start']} → {task['time_range']['end']}")
+    section('处理阶段')
     for stage in task['stages']:
         if stage['stage'] in ('execute', 'verify'):
             continue  # Internal sandbox checks are not real protection results.
         label = {'collect': '日志采集', 'rules': '规则分析', 'model': '模型解释',
                  'policy': '建议生成'}.get(stage['stage'], stage['stage'])
-        _note(label, STATES.get(stage['status'], stage['status']))
+        status_line(label, STATES.get(stage['status'], stage['status']), stage['status'])
+    section('分析结论与范围')
     for warning in task.get('warnings', []):
         _note('范围说明', warning.replace('以下模拟方案', '以下防护建议'))
-    if not task['findings']:
-        _note('规则结果', '未发现规则覆盖范围内的异常线索；不能据此确认安全')
+    assessment = task_assessment(task)
+    _note('规则结果', assessment['label'])
+    if assessment['scope_incomplete']:
+        _note('分析范围不完整', '存在未识别、排除、冲突或未读取内容；这些内容尚无法判断')
+    if not coverage:
+        _note('范围说明', '没有可核实的分析范围信息，请重新采集分析')
+    _note('判断范围', '仅限已分析日志及当前规则，不能据此确认整机安全')
+    if task['findings']:
+        section(f"异常线索 · {len(task['findings'])} 条")
     for finding in task['findings']:
         _note('线索', finding['title'])
         _note('依据', f"{finding['host']} / {finding['account']} / {finding['ip']}，5 分钟内 {finding['failure_count']} 次失败")
@@ -52,6 +61,8 @@ def show(task):
     if task.get('model_error'):
         _note('模型失败', task['model_error'])
     show_diagnostic(task)
+    if task['actions']:
+        section(f"防护建议 · {len(task['actions'])} 条")
     for action in task['actions']:
         _note('防护建议', f"{action['platform']} / {action['target']} / IP {action['ip']}")
         if action['status'] == 'protected_skipped':
@@ -163,7 +174,8 @@ def configure(profiles):
             break
         try:
             _note('正在连接', base)
-            models = discover(profile, key)
+            with busy('获取模型列表'):
+                models = discover(profile, key)
         except RuntimeError as exc:
             _note('未取得模型列表', exc)
             continue
@@ -257,8 +269,9 @@ def chat(store, profiles, task_id):
                     continue
                 if consent == 'session':
                     session_destination = destination
-            _note('正在分析', '等待模型回答…')
-            model_answer(ask(store, profiles, task_id, question, consent=True), '模型回答（需核实）')
+            with busy('等待模型回答'):
+                answer = ask(store, profiles, task_id, question, consent=True)
+            model_answer(answer, '模型回答（需核实）')
         except (ValueError, RuntimeError, OSError) as exc:
             _note('本次提问失败', exc)
             task = store.get(task_id)
@@ -364,11 +377,15 @@ def wizard(store, profiles):
             def analyst(task_id):
                 if not consent_for(profiles, store.get(task_id)):
                     raise ValueError('用户未同意发送证据，模型步骤已取消')
-                return ask(store, profiles, task_id, '解释异常线索并引用证据，给出下一步核查方法。', consent=True)
+                with busy('等待模型解释'):
+                    return ask(store, profiles, task_id, '解释异常线索并引用证据，给出下一步核查方法。', consent=True)
     else:
         _note('分析方式', '规则分析；尚未配置模型，可稍后在主菜单 3 配置并追问')
     _note('正在分析', '读取日志、匹配规则并生成防护建议…')
-    task = run_task(store, source, collector, protected=protected, demo=demo, analyst=analyst)
+    def collect_with_status():
+        with busy('读取日志'):
+            return collector()
+    task = run_task(store, source, collect_with_status, protected=protected, demo=demo, analyst=analyst)
     task_detail(store, profiles, task)
 
 

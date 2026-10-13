@@ -20,6 +20,57 @@ import terminal_ui
 
 
 class TerminalTests(unittest.TestCase):
+    def test_layout_fits_narrow_terminal_and_does_not_interpret_control_text(self):
+        import cli
+        for width in (20, 40, 88):
+            with self.subTest(width=width), patch('cli._width', return_value=width), \
+                    redirect_stdout(io.StringIO()) as output:
+                cli._heading('防护任务 ' + 'a' * 40, '中文状态与消息布局')
+                cli._note('范围说明', '中文证据 ' * 8 + '\x1b[2J')
+                terminal_ui.menu_group('分析与核查', [('1', '本机日志分析与防护建议')])
+                terminal_ui.status_line('规则分析', '完成', 'complete')
+            self.assertNotIn('\x1b', output.getvalue())
+            for line in output.getvalue().splitlines():
+                self.assertLessEqual(cli._cell_width(line), width, line)
+
+    def test_busy_captured_output_has_no_cursor_controls_and_reports_failure(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails), redirect_stdout(io.StringIO()) as output:
+                if fails:
+                    with self.assertRaises(KeyboardInterrupt), terminal_ui.busy('等待模型回答'):
+                        raise KeyboardInterrupt()
+                else:
+                    with terminal_ui.busy('等待模型回答'):
+                        pass
+            text = output.getvalue()
+            self.assertIn('未完成：' if fails else '完成：', text)
+            self.assertIn('耗时', text)
+            self.assertNotIn('\r', text)
+            self.assertNotIn('\x1b', text)
+
+    def test_busy_interruption_stops_worker_and_leaves_a_clean_line(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        with patch.dict(os.environ, {'TERM': 'xterm', 'NO_COLOR': '1'}), \
+                patch('terminal_ui.threading.Thread', wraps=terminal_ui.threading.Thread) as thread, \
+                redirect_stdout(Terminal()) as output:
+            with self.assertRaises(KeyboardInterrupt), terminal_ui.busy('等待模型回答'):
+                raise KeyboardInterrupt()
+        self.assertEqual(thread.call_count, 1)
+        self.assertIn('\r', output.getvalue())
+        self.assertTrue(output.getvalue().endswith('秒\n'))
+        self.assertIn('未完成：', output.getvalue())
+
+    def test_status_color_respects_no_color_and_dumb_terminals(self):
+        import cli
+        with patch('cli.sys.stdout.isatty', return_value=True):
+            with patch.dict(os.environ, {'WT_SESSION': 'test', 'TERM': 'xterm'}, clear=True):
+                self.assertEqual(cli._style('失败', '31'), '\x1b[31m失败\x1b[0m')
+            for env in ({'NO_COLOR': '', 'WT_SESSION': 'test'}, {'TERM': 'dumb', 'WT_SESSION': 'test'}):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(cli._style('失败', '31'), '失败')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / 'backend/data')
         self.addCleanup(self.temp.cleanup)

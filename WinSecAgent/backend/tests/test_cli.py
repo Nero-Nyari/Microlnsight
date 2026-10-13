@@ -56,7 +56,7 @@ with cli._session() as db:
             database = Path(directory) / "preview.db"
             demo = self.run_cli(database, "demo", "windows_demo_sequence")
             self.assertEqual(demo.returncode, 0, demo.stderr)
-            self.assertIn("发现异常线索", demo.stdout)
+            self.assertIn("发现待核查线索", demo.stdout)
             self.assertIn("5 条去重后的 4625", demo.stdout)
             listing = self.run_cli(database, "list")
             self.assertEqual(listing.returncode, 0, listing.stderr)
@@ -82,8 +82,8 @@ with cli._session() as db:
         with tempfile.TemporaryDirectory(dir=TEST_DATA) as directory:
             demo = self.run_cli(Path(directory) / "preview.db", "demo", "windows_demo_single")
             self.assertEqual(demo.returncode, 0, demo.stderr)
-            self.assertIn("证据不足", demo.stdout)
-            self.assertNotIn("发现异常线索", demo.stdout)
+            self.assertIn("在已分析范围内未发现规则线索", demo.stdout)
+            self.assertNotIn("发现待核查线索", demo.stdout)
 
     def test_batch_analysis_explains_event_ids_without_selecting_each_record(self):
         with tempfile.TemporaryDirectory(dir=TEST_DATA) as directory:
@@ -107,14 +107,14 @@ with cli._session() as db:
             self.assertEqual(seed.returncode, 0, seed.stderr)
             self.assertIn("账户登录失败（4625，Security）：5 条", seed.stdout)
             self.assertIn("账户登录成功（4624，Security）：1 条", seed.stdout)
-            self.assertIn("发现异常线索", seed.stdout)
+            self.assertIn("发现待核查线索", seed.stdout)
             listing = self.run_cli(database, "list")
             self.assertIn("记录列表", listing.stdout)
             self.assertIn("账户登录失败（4625）", listing.stdout)
             output = Path(directory) / "batch.md"
             batch = self.run_cli(database, "batch", "--output", str(output))
             self.assertEqual(batch.returncode, 0, batch.stderr)
-            self.assertIn("发现异常线索", batch.stdout)
+            self.assertIn("发现待核查线索", batch.stdout)
             report = output.read_text(encoding="utf-8")
             self.assertIn("范围：本次选取的已导入日志", report)
             self.assertIn("原始证据快照", report)

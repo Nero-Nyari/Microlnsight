@@ -121,38 +121,44 @@ class TaskStore:
 
 
 def linux_events(text):
-    from server_logs import SSH_FAILURE, SSH_SUCCESS, _host
+    from server_logs import parse_ssh_line
     events, rejected = [], 0
     for number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
-        try:
-            if line.lstrip().startswith('{'):
-                row = json.loads(line)
-                message = row.get('MESSAGE', '')
-                host = row.get('_HOSTNAME', '')
-                when = datetime.fromtimestamp(int(row['__REALTIME_TIMESTAMP']) / 1_000_000, timezone.utc)
-                identity = row.get('__CURSOR') or digest(line)
-                process = row.get('SYSLOG_IDENTIFIER') or row.get('_COMM', '')
-                trusted_process = process in ('sshd', 'sshd-session', 'sshd-auth')
-            else:
-                message, host = line, _host(line)
-                when = stamp(line.split(' ', 1)[0])
-                identity = digest(line)
-                trusted_process = bool(re.match(r'^\S+\s+\S+\s+sshd(?:-session|-auth)?\[\d+\]:', line))
-            failure, success = SSH_FAILURE.search(message), SSH_SUCCESS.search(message)
-            match = failure or success
-            ip = address(match['ip']) if match else None
-            if not (trusted_process and match and ip and host and when):
-                rejected += 1
-                continue
-            events.append(dict(platform='linux', host=host, account=match['account'], ip=ip,
-                               kind='failure' if failure else 'success', time=when.isoformat(),
-                               identity=str(identity), ref=f'ssh:{number}', raw=line[:4096],
-                               raw_sha256=hashlib.sha256(line.encode()).hexdigest(), raw_truncated=len(line) > 4096))
-        except (ValueError, TypeError, KeyError, OverflowError, OSError, AttributeError):
+        event, _ = parse_ssh_line(line)
+        if event is None:
             rejected += 1
+            continue
+        events.append(dict(platform='linux', host=event['host'], account=event['account'], ip=event['ip'],
+                           kind=event['kind'], time=event['time'].isoformat(),
+                           identity=str(event['identity'] or digest(line)), ref=f'ssh:{number}', raw=line[:4096],
+                           raw_sha256=hashlib.sha256(line.encode()).hexdigest(), raw_truncated=len(line) > 4096))
     return events, rejected
+
+
+def task_assessment(task):
+    """Derive a current verdict, including failed and legacy tasks, without writes."""
+    state = task.get('status')
+    coverage = task.get('coverage') or {}
+    incomplete = bool(coverage.get('excluded') or coverage.get('conflicts')
+                      or task.get('scope_incomplete') or coverage.get('scope_incomplete'))
+    if state == 'failed':
+        collected = any(s.get('stage') == 'collect' and s.get('status') == 'complete' for s in task.get('stages', []))
+        status, label = 'failed', '分析失败，本次未完成分析' if collected else '采集失败，本次未完成分析'
+    elif state == 'interrupted':
+        status, label = 'interrupted', '分析中断，本次未完成分析'
+    elif state == 'collecting':
+        status, label = 'pending', '采集中，尚无分析结论'
+    elif task.get('findings'):
+        status, label = 'findings', '发现待核查线索'
+    elif not coverage.get('retained'):
+        status, label = 'insufficient_data', '数据不足，无法判断'
+    else:
+        status, label = 'no_findings', '在已分析范围内未发现规则线索'
+    if not coverage:
+        incomplete = True
+    return dict(status=status, label=label, scope_incomplete=incomplete)
 
 
 def windows_events(rows):
@@ -208,7 +214,8 @@ def collect_linux(target=None, minutes=15, limit=1000):
     if len(text.splitlines()) >= limit:
         warnings.append('达到采集上限；更早记录可能未读取，未读数量未知')
     warnings.append(f'仅覆盖 SSH journal，最近 {minutes} 分钟；未采集应用和文件审计日志')
-    return dict(events=events, rejected=rejected, warnings=warnings)
+    return dict(events=events, rejected=rejected, warnings=warnings,
+                scope_incomplete=bool(result.stderr.strip() or len(text.splitlines()) >= limit))
 
 
 def collect_export(directory):
@@ -240,7 +247,9 @@ def collect_windows(limit=1000):
             warnings.append(str(channel.get('message') or channel.get('status')))
         if channel.get('events_read', 0) >= limit:
             warnings.append('达到采集上限；更早记录可能未读取，未读数量未知')
-    return dict(events=events, rejected=rejected, warnings=warnings)
+    return dict(events=events, rejected=rejected, warnings=warnings,
+                scope_incomplete=any(c.get('status') != 'success' or c.get('events_read', 0) >= limit
+                                     for c in result.get('channel_results', [])))
 
 
 def demo_events(platform):
@@ -289,9 +298,12 @@ def detect(collection):
                              failure_count=len(best), start=best[0]['time'], end=evidence[-1]['time'],
                              refs=[r['ref'] for r in evidence], identities=[r['identity'] for r in evidence],
                              next_steps=['核对来源 IP 与运维授权', '核对登录会话及随后执行的命令', '检查管理入口是否仍可用']))
-    return dict(events=rows, findings=findings, coverage=dict(input=len(collection['events']) + collection.get('rejected', 0),
+    result = dict(events=rows, findings=findings, coverage=dict(input=len(collection['events']) + collection.get('rejected', 0),
                 retained=len(rows), excluded=collection.get('rejected', 0), duplicates=duplicates, conflicts=conflicts),
                 time_range=dict(start=rows[0]['time'] if rows else None, end=rows[-1]['time'] if rows else None))
+    result['coverage']['scope_incomplete'] = bool(collection.get('scope_incomplete'))
+    result['assessment'] = task_assessment(result)
+    return result
 
 
 def plan(findings, protected=(), ttl=600, demo=False, source=''):
@@ -364,6 +376,7 @@ def run_task(store, source, collector, protected=(), ttl=600, demo=False, analys
         task['stages'].append(dict(stage='collect', status='complete', at=utcnow().isoformat()))
         task['stages'].append(dict(stage='rules', status='complete', at=utcnow().isoformat()))
         task['status'] = 'analyzing'
+        task['assessment'] = task_assessment(task)
         store.save(task)
         if analyst:
             try:
@@ -388,6 +401,7 @@ def run_task(store, source, collector, protected=(), ttl=600, demo=False, analys
     except (Exception, KeyboardInterrupt) as exc:
         task['status'] = 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed'
         task['error'] = str(exc)[:2000]
+        task['assessment'] = task_assessment(task)
         store.save(task)
         raise
     return task

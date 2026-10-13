@@ -1,13 +1,88 @@
 """Small, dependency-free helpers for ordinary SSH/Windows terminals."""
 from functools import wraps
+from contextlib import contextmanager
 import getpass
+import os
 import re
 import sys
+import threading
+import time
 import warnings
 
 
 class Cancelled(Exception):
     pass
+
+
+def section(title):
+    from cli import _wrap
+    print()
+    _wrap(title, '  ', color='1')
+
+
+def menu_group(title, items):
+    from cli import _wrap
+    section(title)
+    for key, label in items:
+        _wrap(label, f'    {key}  ', '       ')
+
+
+def status_line(label, value, state):
+    """Use text badges as well as colors, including in monochrome terminals."""
+    from cli import _wrap
+    badge, color = {
+        'complete': ('完成', '32'),
+        'completed_simulation': ('完成', '32'),
+        'collecting': ('进行中', '36'), 'analyzing': ('进行中', '36'),
+        'failed': ('失败', '31'), 'interrupted': ('中断', '33'),
+        'not_requested': ('未启用', '90'),
+    }.get(state, ('状态', '90'))
+    _wrap(f'[{badge}] {label}：{value}', '  ', '    ', color=color)
+
+
+@contextmanager
+def busy(label):
+    """Show elapsed wait time without guessing completion percentages.
+
+    Only wrap calls that cannot prompt or print while the indicator is active.
+    Captured output gets static lines and never cursor control characters.
+    """
+    from cli import _cell_width, _note, _width
+    output = sys.stdout
+    animated = output.isatty() and os.environ.get('TERM') != 'dumb'
+    started = time.monotonic()
+    stopped = threading.Event()
+    def render(frame):
+        line = f'  {"|/-"[frame % 3]} {label} · {int(time.monotonic() - started)} 秒'
+        while _cell_width(line) > _width() - 1:
+            line = line[:-1]
+        output.write('\r' + line + ' ' * max(0, _width() - 1 - _cell_width(line)))
+        output.flush()
+    def animate():
+        frame = 0
+        while not stopped.wait(0.2):
+            frame += 1
+            render(frame)
+    worker = None
+    if animated:
+        render(0)
+        worker = threading.Thread(target=animate, daemon=True)
+        worker.start()
+    else:
+        _note('进行中', label)
+    outcome = '完成'
+    try:
+        yield
+    except BaseException:
+        outcome = '未完成'
+        raise
+    finally:
+        stopped.set()
+        if worker:
+            worker.join()
+            output.write('\r' + ' ' * (_width() - 1) + '\r')
+            output.flush()
+        _note(outcome, f'{label} · 耗时 {time.monotonic() - started:.1f} 秒')
 
 
 def setup_terminal():

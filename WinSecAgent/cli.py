@@ -42,7 +42,7 @@ EVENT_CHANNELS = {
 
 def _width() -> int:
     """Keep output readable in both narrow terminals and captured output."""
-    return max(32, min(shutil.get_terminal_size(fallback=(88, 24)).columns, 100))
+    return max(12, min(shutil.get_terminal_size(fallback=(88, 24)).columns, 100))
 
 
 def _cell_width(value: str) -> int:
@@ -52,13 +52,13 @@ def _cell_width(value: str) -> int:
 
 
 def _style(value: str, color: str) -> str:
-    enabled = (sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    enabled = (sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
                and (os.name != "nt" or os.environ.get("WT_SESSION")
                     or os.environ.get("TERM_PROGRAM") == "Windows_Terminal"))
     return f"\x1b[{color}m{value}\x1b[0m" if enabled else value
 
 
-def _wrap(value: object, indent: str = "", continuation: str | None = None) -> None:
+def _wrap(value: object, indent: str = "", continuation: str | None = None, *, color: str = "") -> None:
     """Wrap mixed Chinese and Latin text by terminal cells, without losing words."""
     continuation = indent if continuation is None else continuation
     text = str(value).replace("\r", " ").replace("\n", " ").replace("\t", "    ")
@@ -67,33 +67,36 @@ def _wrap(value: object, indent: str = "", continuation: str | None = None) -> N
     line = prefix
     for token in re.findall(r"[A-Za-z0-9_./:#-]+|\s+|.", text):
         if _cell_width(line + token) > _width() and line != prefix:
-            print(line.rstrip())
+            print(_style(line.rstrip(), color) if color else line.rstrip())
             prefix = continuation
             line = prefix
             token = token.lstrip()
         if _cell_width(line + token) > _width() and line == prefix:
             for char in token:
                 if _cell_width(line + char) > _width() and line != prefix:
-                    print(line.rstrip())
+                    print(_style(line.rstrip(), color) if color else line.rstrip())
                     prefix = continuation
                     line = prefix
                 line += char
         else:
             line += token
-    print(line.rstrip())
+    print(_style(line.rstrip(), color) if color else line.rstrip())
 
 
 def _heading(title: str, subtitle: str = "") -> None:
     print()
-    print(_style("─" * _width(), "36"))
-    print(_style(f"  {title}", "1;36"))
+    _wrap(title, "  ", color="1;36")
     if subtitle:
-        _wrap(subtitle, "  ")
-    print(_style("─" * _width(), "36"))
+        _wrap(subtitle, "  ", color="90")
+    print(_style("─" * _width(), "90"))
 
 
 def _note(label: str, value: object) -> None:
-    _wrap(f"{label}  {value}", "  ", "    ")
+    errors = {'操作失败', '失败原因', '模型失败', '本次提问失败', '导出失败', '输入有误', '请修改这一项'}
+    warnings = {'范围说明', '分析范围不完整', '未取得模型列表', '没有可用登录证据'}
+    color = '31' if label in errors else '33' if label in warnings else ''
+    marker = '! ' if color else ''
+    _wrap(f"{marker}{label}：{value}", "  ", "    ", color=color)
 
 
 def _menu() -> None:
@@ -302,6 +305,8 @@ def _show_result(incident) -> None:
     assessment = assessment_for(incident)
     _heading(f"记录 #{incident.id}  ·  {assessment['label']}")
     _wrap(assessment["reasoning"], "  ", "  ")
+    if assessment.get('scope_incomplete'):
+        _note('分析范围不完整', '部分内容无法参与规则判断；请核对范围说明')
     correlation = current_runs(incident).get("Correlation")
     if correlation and correlation.output_data:
         result = correlation.output_data
@@ -485,6 +490,8 @@ def show_record_detail(db, incident_id: int, *, raw: bool = False) -> None:
     _note("时间 / 通道", f"{_record_time(incident, source):%Y-%m-%d %H:%M} · {source.get('channel') or '未知'}")
     _note("主机 / 来源", f"{source.get('computer') or '未知'} · {source.get('source_ip') or '未知'}")
     _note("判断依据", assessment["reasoning"])
+    if assessment.get('scope_incomplete'):
+        _note('分析范围不完整', '部分内容无法参与规则判断；请核对范围说明')
     correlation = current_runs(incident).get("Correlation")
     if correlation and correlation.status == "success" and correlation.output_data:
         for finding in correlation.output_data.get("findings", []):
@@ -570,19 +577,22 @@ def batch_analyze(db, incident_ids: list[int] | None = None, output: Path | None
     if not incidents:
         raise ValueError("没有可批量分析的真实日志；请先读取并导入")
     truncated = selected_total > MAX_CANDIDATES
+    scope_incomplete = truncated or collection is None
     warnings = ["仅分析本次选取且已导入的真实日志；未读通道和未导入记录不在范围内。"]
     if truncated:
         warnings.append(f"所选范围共 {selected_total} 条，仅分析最新 {MAX_CANDIDATES} 条，超限跳过 {selected_total - len(incidents)} 条。")
     if collection:
         for channel in collection["channel_results"]:
             if channel["status"] != "success":
+                scope_incomplete = True
                 warnings.append(f"采集范围：{channel['channel']} {channel['status']}；{channel.get('message') or '读取未完成'}")
             limit = collection.get("requested_max_events")
             if limit and channel["events_read"] >= limit:
+                scope_incomplete = True
                 warnings.append(f"{channel['channel']} 达到采集上限 {limit} 条，未读数量未知。")
     else:
         warnings.append("历史采集覆盖信息尚未持久化；本次仅能确认已导入记录，无法核实原通道是否读全。")
-    result = analyze_records([record(i.alert, i.id) for i in incidents], warnings=warnings)
+    result = analyze_records([record(i.alert, i.id) for i in incidents], warnings=warnings, scope_incomplete=scope_incomplete)
     result["scope"] = "batch"
     result["coverage"].update(selected_total=selected_total, skipped_limit=selected_total - len(incidents))
     incident_by_alert = {i.alert_id: i.id for i in incidents}
@@ -595,6 +605,9 @@ def batch_analyze(db, incident_ids: list[int] | None = None, output: Path | None
         _note("来源时间（UTC）", f"{source['host']} / {source['channel']} · {source['retained']} 条 · {source['start'] or '未知'} 至 {source['end'] or '未知'}")
     _show_event_summary(result["records"], parsed=True)
     _heading(f"结论  ·  {result['assessment']['label']}")
+    _note('规则可分析', f"{coverage['eligible_records']} 条；保留记录不等于符合规则要求")
+    if coverage['scope_incomplete']:
+        _note('分析范围不完整', '部分内容无法参与分析，或原始采集范围尚无法核实')
     if result["findings"]:
         for finding in result["findings"]:
             _wrap(finding["title"], "  • ", "    ")

@@ -20,7 +20,7 @@ import uuid
 import zipfile
 
 REPOSITORY = 'Nero-Nyari/Microlnsight'
-VERSION = '0.2.5'
+VERSION = '0.2.6'
 MAX_DOWNLOAD = 32 * 1024 * 1024
 
 

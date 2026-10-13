@@ -21,7 +21,7 @@ LOG_FILES = (
     "kernel-warnings.journal.log", "mysql-error.log", "nginx-mysql.journal.log",
 )
 MAX_FILE_BYTES = 100 * 1024 * 1024
-RULE_VERSION = 2
+RULE_VERSION = 3
 HTTP_WINDOW_SECONDS = 120
 SSH_FAILURE = re.compile(r"Failed password for (?:invalid user )?(?P<account>.+?) from (?P<ip>\S+) port \d+")
 SSH_SUCCESS = re.compile(r"Accepted (?P<method>\S+) for (?P<account>.+?) from (?P<ip>\S+) port \d+")
@@ -74,6 +74,50 @@ def _ip(value: str) -> str | None:
         return None
 
 
+def parse_ssh_line(line: str) -> tuple[dict | None, str]:
+    """Shared authentication parser for journal JSON and exported journal text.
+
+    A filename or a quoted authentication message is not evidence of sshd origin.
+    Missing metadata stays excluded; callers retain the raw source and count it.
+    """
+    try:
+        identity = None
+        if line.lstrip().startswith('{'):
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                return None, 'invalid'
+            # Prefer journal's process metadata over the application supplied tag.
+            process = row.get('_COMM') if '_COMM' in row else row.get('SYSLOG_IDENTIFIER')
+            message = row.get('MESSAGE', '')
+            host = row.get('_HOSTNAME', '')
+            micros = row.get('__REALTIME_TIMESTAMP')
+            when = datetime.fromtimestamp(int(micros) / 1_000_000, timezone.utc) if micros is not None else None
+            identity = row.get('__CURSOR')
+        else:
+            header = re.match(r'^\S+\s+(\S+)\s+([^\s\[]+)(?:\[\d+\])?:\s+(.*)$', line.rstrip('\r\n'))
+            if not header:
+                return None, 'unknown_source'
+            host, process, message = header.groups()
+            when = _time(line.split(' ', 1)[0])
+        if process not in ('sshd', 'sshd-session', 'sshd-auth'):
+            return None, 'unknown_source'
+        if not isinstance(message, str):
+            return None, 'invalid'
+        failure, success = SSH_FAILURE.match(message), SSH_SUCCESS.match(message)
+        match = failure or success
+        if not match:
+            return None, 'unsupported'
+        ip = _ip(match['ip'])
+        account = match['account'].strip()
+        if not (isinstance(host, str) and host.strip() and account and ip and when):
+            return None, 'missing_metadata'
+        return dict(time=when.astimezone(timezone.utc), host=host.strip().casefold(),
+                    ip=ip, account=account, kind='failure' if failure else 'success',
+                    method=success['method'] if success else None, identity=identity), ''
+    except (ValueError, TypeError, KeyError, OverflowError, OSError):
+        return None, 'invalid'
+
+
 class SourceCoverage:
     """Account for every physical line; times include recognized timestamps only."""
 
@@ -109,6 +153,9 @@ class SourceCoverage:
             row = _json_record(line)
             when = _time(row.get("occurred_at")) if row else None
             when = when or _time(line.split(" ", 1)[0])
+            if name == 'ssh.journal.log':
+                ssh, _ = parse_ssh_line(line)
+                when = ssh['time'] if ssh else when
             if when:
                 when = when.astimezone(timezone.utc).isoformat()
                 info["start"] = min(info["start"], when) if info["start"] else when
@@ -225,25 +272,28 @@ def analyze_directory(source: str | Path) -> dict:
     malformed_json, unstructured_lines, probe_requests, nginx_errors = Counter(), Counter(), [], []
     operation_reasons = Counter()
     system_error_categories = Counter()
+    ssh_rejected = Counter()
+    ssh_rejected_refs = []
 
     ssh_path = directory / "ssh.journal.log"
     if ssh_path.is_file():
         for line_no, line in coverage.lines(ssh_path.name):
-            when = _time(line.split(" ", 1)[0])
-            match = SSH_FAILURE.search(line)
-            if match:
-                coverage.mark(ssh_path.name)
-                item = {"time": when, "host": _host(line), "ip": match["ip"], "account": match["account"],
-                        "ref": _ref(ssh_path.name, line_no)}
+            item, reason = parse_ssh_line(line)
+            if item is None:
+                ssh_rejected[reason] += 1
+                if len(ssh_rejected_refs) < 3:
+                    ssh_rejected_refs.append(_ref(ssh_path.name, line_no))
+                if reason in ('invalid', 'missing_metadata'):
+                    coverage.mark(ssh_path.name, 'invalid', line_no)
+                continue
+            coverage.mark(ssh_path.name)
+            item['ref'] = _ref(ssh_path.name, line_no)
+            if item['kind'] == 'failure':
                 failed.append(item)
                 ssh_sources[item["ip"]] += 1
                 ssh_accounts[item["account"]] += 1
-                continue
-            match = SSH_SUCCESS.search(line)
-            if match:
-                coverage.mark(ssh_path.name)
-                accepted.append({"time": when, "host": _host(line), "ip": match["ip"], "account": match["account"],
-                                 "method": match["method"], "ref": _ref(ssh_path.name, line_no)})
+            else:
+                accepted.append(item)
 
     nginx_path = directory / "nginx-security-access.log"
     if nginx_path.is_file():
@@ -410,24 +460,32 @@ def analyze_directory(source: str | Path) -> dict:
         warnings.append("存在未支持的文件，未读取其内容：" + "、".join(coverage.ignored))
     starts = [info["start"] for info in files.values() if info["start"]]
     ends = [info["end"] for info in files.values() if info["end"]]
-    ssh_excluded = sum(not (item["time"] and item["host"] and item["account"] and _ip(item["ip"]))
-                       for item in failed + accepted)
+    ssh_excluded = sum(ssh_rejected.values())
     if ssh_excluded:
-        warnings.append(f"{ssh_excluded} 条 SSH 认证记录缺少有效主机、账户、IP 或带时区时间；保留汇总但不参与失败后成功关联。")
+        warnings.append(f"SSH 排除 {ssh_excluded} 条：无法确认来源 {ssh_rejected['unknown_source']} 条，"
+                        f"缺少有效主机/账户/IP/带时区时间 {ssh_rejected['missing_metadata']} 条，"
+                        f"格式无效 {ssh_rejected['invalid']} 条，未支持消息 {ssh_rejected['unsupported']} 条；"
+                        "原文保留，不计入认证次数或关联。示例：" + '、'.join(ssh_rejected_refs))
     signal_count = (len(success_after_failures) + len(root_password) + len(five_xx)
                     + len(probe_requests) + len(exceptions) + len(startup_errors)
                     + sum(operation_reasons.values())
                     + sum(item["category"] != "其他" for item in nginx_errors)
                     + sum(count for category, count in system_error_categories.items() if category != "其他系统错误"))
-    assessment = ("没有足够的已识别记录，无法判断" if not quality["parsed"] else
-                  "发现待核查线索" if signal_count else "未发现当前规则覆盖范围内的线索")
+    analysis_status = 'findings' if signal_count else 'no_findings' if quality['parsed'] else 'insufficient_data'
+    assessment = ("数据不足，无法判断" if analysis_status == 'insufficient_data' else
+                  "发现待核查线索" if signal_count else "在已分析范围内未发现规则线索")
+    quality['scope_incomplete'] = bool(quality['unparsed'] or quality['invalid'] or quality['missing_time']
+                                     or quality['skipped_large'] or quality['ignored_files']
+                                     or files['ssh.journal.log']['status'] == 'missing'
+                                     or files['nginx-security-access.log']['status'] == 'missing')
     return {
-        "rule_version": RULE_VERSION, "quality": quality, "assessment": assessment,
+        "rule_version": RULE_VERSION, "quality": quality, "assessment": assessment, "analysis_status": analysis_status,
         "source": str(directory), "analyzed_at": datetime.now().astimezone().isoformat(),
         "files": files, "checks": checks, "warnings": warnings,
         "time_range": {"start": min(starts) if starts else None, "end": max(ends) if ends else None},
         "ssh": {"failed": len(failed), "accepted": len(accepted), "distinct_failure_ips": len(ssh_sources),
                 "correlation_excluded": ssh_excluded,
+                "rejected_reasons": dict(ssh_rejected),
                 "top_failure_ips": ssh_sources.most_common(10), "top_accounts": ssh_accounts.most_common(10),
                 "root_failed": ssh_accounts["root"],
                 "accepted_examples": accepted[:10], "success_after_failures": success_after_failures,
@@ -554,7 +612,9 @@ def render_report(result: dict) -> str:
 
 def coverage_lines(result: dict) -> list[str]:
     q = result["quality"]
-    return [f"文件：发现 {q['discovered']} 个日志/其他文件（不含校验清单），识别 {q['recognized']} 个，"
+    return ["分析范围不完整：存在未识别、缺失、无效或跳过的内容。" if q.get('scope_incomplete') else
+            "分析范围：仅限本次已读取的受支持日志，不代表主机全部活动。",
+            f"文件：发现 {q['discovered']} 个日志/其他文件（不含校验清单），识别 {q['recognized']} 个，"
             f"未支持 {len(q['ignored_files'])} 个，超限跳过 {q['skipped_large']} 个。",
             f"记录：读取 {q['lines']} 行，已识别 {q['parsed']} 行，未识别 {q['unparsed']} 行，"
             f"格式无效 {q['invalid']} 行，重复 {q['duplicates']} 行，空白 {q['blank']} 行。",
