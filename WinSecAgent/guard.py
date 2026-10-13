@@ -220,7 +220,7 @@ def collect_export(directory):
     data = path.read_bytes()
     events, rejected = linux_events(data.decode('utf-8', errors='replace'))
     return dict(events=events, rejected=rejected, source_sha256=hashlib.sha256(data).hexdigest(),
-                warnings=['历史导出仅用于复盘；模拟处置不代表当前服务器状态'])
+                warnings=['历史导出仅用于复盘；防护建议不代表当前服务器状态'])
 
 
 def collect_windows(limit=1000):
@@ -296,7 +296,7 @@ def detect(collection):
 
 def plan(findings, protected=(), ttl=600, demo=False, source=''):
     if not 60 <= ttl <= 3600:
-        raise ValueError('模拟封禁期限应为 60–3600 秒')
+        raise ValueError('建议封禁期限应为 60–3600 秒')
     networks = [ipaddress.ip_network(item, strict=False) for item in protected]
     actions = []
     for finding in findings:
@@ -310,7 +310,7 @@ def plan(findings, protected=(), ttl=600, demo=False, source=''):
                       reason='管理/保护地址，禁止提出封禁' if blocked else '规则达到阈值；等待核实来源授权',
                       verification_plan=['确认目标主机与 IP', '检查规则是否存在及到期时间',
                                          '从独立管理通道检查可达性', '复查登录失败趋势，不能仅凭日志减少认定有效'],
-                      rollback_plan='真实部署时需按本次规则标识撤销并验证；样板未创建规则，无需恢复')
+                      rollback_plan='如后续人工实施，需记录规则标识以便撤销并验证；当前尚未执行，无需恢复')
         action['key'] = digest([source, finding['platform'], finding['host'], str(ip), sorted(finding['identities']),
                                 sorted(protected), ttl, demo])
         actions.append(action)
@@ -375,7 +375,7 @@ def run_task(store, source, collector, protected=(), ttl=600, demo=False, analys
                 if isinstance(exc, ModelError):
                     task['model_diagnostic'] = exc.diagnostic
                 task['stages'].append(dict(stage='model', status='failed'))
-                task['warnings'].append('模型未完成；以下模拟方案仅依据固定规则，不能视为模型分析成功')
+                task['warnings'].append('模型未完成；以下防护建议仅依据固定规则，不能视为模型分析成功')
         else:
             task['stages'].append(dict(stage='model', status='not_requested'))
         task['policy'] = dict(protected=list(protected), ttl_seconds=ttl, failure_threshold=5, window_seconds=300)

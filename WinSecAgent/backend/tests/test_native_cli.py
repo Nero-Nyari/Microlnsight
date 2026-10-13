@@ -92,7 +92,7 @@ class NativeCliTests(unittest.TestCase):
                                             cwd=unpacked, capture_output=True, text=True, encoding='utf-8', timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn('合成演示数据', result.stdout)
-                    self.assertIn('模拟器自检', result.stdout)
+                    self.assertIn('尚未执行', result.stdout)
                 else:
                     with patch('agent.ROOT', unpacked):
                         with self.assertRaisesRegex(ValueError, '安装包'):

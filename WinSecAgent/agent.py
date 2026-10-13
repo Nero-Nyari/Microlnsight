@@ -74,11 +74,11 @@ def _main(argv=None):
                 show(run_task(store, f'demo:{system}', lambda: demo_events(system), demo=True))
                 return 0
             while True:
-                _heading(f'WinSecAgent · {system.title()} 本机版', '当前主机采集与分析 · 防护处置为模拟')
+                _heading(f'WinSecAgent · {system.title()} 本机版', '当前主机采集与分析 · 提供防护建议，尚未执行')
                 _note('本机数据目录', database.parent)
                 active = profiles.load()
                 _note('当前模型', (active['active'] + ' / ' + active['profiles'][active['active']]['model']) if active['active'] else '尚未配置，可先运行规则分析')
-                print('  1 本机日志分析与模拟防护\n  2 任务、证据与模型追问\n  3 模型配置与选择\n  4 本平台合成演示\n  5 检查更新\n  6 更新并退出\n  0 退出')
+                print('  1 本机日志分析与防护建议\n  2 任务、证据与模型追问\n  3 模型配置与选择\n  4 本平台合成演示\n  5 检查更新\n  6 更新并退出\n  0 退出')
                 choice = read_line('  选择 [0-6] > ')
                 try:
                     if choice == '0':

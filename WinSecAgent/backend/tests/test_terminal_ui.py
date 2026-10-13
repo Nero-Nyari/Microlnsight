@@ -181,7 +181,7 @@ printf '**literal**\\n' | cat
         collect.assert_called_once()
         self.assertEqual(len(store.recent()), 1)
         self.assertIn('请修改这一项', output.getvalue())
-        self.assertIn('模拟分析完成', output.getvalue())
+        self.assertIn('分析完成（仅提供建议）', output.getvalue())
 
     def test_tasks_open_by_number_and_return_to_list_after_details(self):
         store = guard.TaskStore(Path(self.temp.name) / 'tasks.db')

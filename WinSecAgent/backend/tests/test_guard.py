@@ -140,7 +140,7 @@ class GuardTests(unittest.TestCase):
                                         text=True, encoding='utf-8', timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('合成演示数据', result.stdout)
-                self.assertIn('模拟器自检', result.stdout)
+                self.assertIn('尚未执行', result.stdout)
             tasks = subprocess.run(prefix + ['tasks'], capture_output=True, text=True, encoding='utf-8', timeout=30)
             self.assertIn('demo-windows', tasks.stdout)
             self.assertIn('demo-linux', tasks.stdout)

@@ -10,10 +10,10 @@ from guard import TaskStore, collect_export, collect_linux, collect_windows, dem
 from guard_models import Profiles, ask, context, deepseek, discover, is_loopback, validate
 from terminal_ui import Cancelled, cancellable, choice, field, model_answer, read_line
 
-STATES = {'completed_simulation': '模拟分析完成', 'collecting': '采集中', 'analyzing': '分析中',
+STATES = {'completed_simulation': '分析完成（仅提供建议）', 'collecting': '采集中', 'analyzing': '分析中',
           'failed': '失败', 'interrupted': '已中断', 'complete': '完成', 'not_requested': '未启用',
-          'simulated': '已模拟', 'simulation_only': '仅模拟验证', 'protected_skipped': '保护名单内，已跳过',
-          'duplicate_skipped': '相同证据已处理，已跳过'}
+          'simulated': '建议已生成，尚未执行', 'simulation_only': '防护效果尚未验证', 'protected_skipped': '保护名单内，已跳过',
+          'duplicate_skipped': '相同证据已有建议，已跳过'}
 
 
 def resources(database):
@@ -23,7 +23,7 @@ def resources(database):
 
 def show(task):
     from cli import _heading, _note, _wrap
-    _heading(f"防护任务 {task['id']}", '合成演示数据 · 模拟处置' if task['demo'] else '真实日志 · 模拟处置')
+    _heading(f"防护任务 {task['id']}", '合成演示数据 · 防护建议（尚未执行）' if task['demo'] else '真实日志 · 防护建议（尚未执行）')
     _note('来源', task['source'])
     _note('状态', STATES.get(task['status'], task['status']))
     if task.get('error'):
@@ -34,11 +34,13 @@ def show(task):
               f"排除/不支持 {coverage['excluded']}，重复 {coverage['duplicates']}，冲突 {coverage['conflicts']}")
         _note('日志时间 UTC', f"{task['time_range']['start']} → {task['time_range']['end']}")
     for stage in task['stages']:
+        if stage['stage'] in ('execute', 'verify'):
+            continue  # Internal sandbox checks are not real protection results.
         label = {'collect': '日志采集', 'rules': '规则分析', 'model': '模型解释',
-                 'policy': '防护策略', 'execute': '模拟执行', 'verify': '模拟验证'}.get(stage['stage'], stage['stage'])
+                 'policy': '建议生成'}.get(stage['stage'], stage['stage'])
         _note(label, STATES.get(stage['status'], stage['status']))
     for warning in task.get('warnings', []):
-        _note('范围说明', warning)
+        _note('范围说明', warning.replace('以下模拟方案', '以下防护建议'))
     if not task['findings']:
         _note('规则结果', '未发现规则覆盖范围内的异常线索；不能据此确认安全')
     for finding in task['findings']:
@@ -51,13 +53,18 @@ def show(task):
         _note('模型失败', task['model_error'])
     show_diagnostic(task)
     for action in task['actions']:
-        _note('模拟方案', f"{action['platform']} / {action['target']} / IP {action['ip']} / {action['ttl_seconds']} 秒")
-        _note('处置状态', f"{STATES.get(action['status'], action['status'])}；{action['reason']}")
+        _note('防护建议', f"{action['platform']} / {action['target']} / IP {action['ip']}")
+        if action['status'] == 'protected_skipped':
+            _note('建议内容', '保留该管理/保护地址，不建议封禁')
+        else:
+            _note('建议内容', f"核实来源未获授权后，可考虑临时封禁 {action['ttl_seconds']} 秒")
+        _note('建议状态', f"{STATES.get(action['status'], action['status'])}；{action['reason']}")
         if action.get('previous_task'):
-            _note('相同证据已处理', action['previous_task'])
-        _note('验证状态', '未执行真实封禁，也未验证防护效果')
-        if action.get('simulation_checks'):
-            _note('模拟器自检', '规则创建、到期失效和撤销验证通过' if action['simulation_verified'] else '模拟器自检失败')
+            _note('已有建议的任务', action['previous_task'])
+        _note('执行情况', '尚未执行；未修改服务器防火墙，防护效果尚未验证')
+        if action['status'] == 'protected_skipped':
+            continue
+        _note('实施后核验建议', '以下项目需在实际实施后检查')
         for step in action['verification_plan']:
             _wrap(step, '    · ')
         _note('恢复计划', action['rollback_plan'])
@@ -317,7 +324,7 @@ def wizard(store, profiles):
     system = platform.system().lower()
     if system not in ('windows', 'linux'):
         raise ValueError('本机版本只支持 Windows 或 Linux')
-    _heading(f'{system.title()} 本机采集与模拟防护', '回车采用默认值 · 0 返回 · 所有处置仅模拟')
+    _heading(f'{system.title()} 本机采集与防护建议', '回车采用默认值 · 0 返回 · 仅提供建议，尚未执行')
     print(f'  1 读取本机 {system.title()} 日志（默认）\n  2 本机导出目录\n  3 本平台合成演示')
     source_choice = choice('来源', ('1', '2', '3'), '1')
     if source_choice == '1':
@@ -360,20 +367,20 @@ def wizard(store, profiles):
                 return ask(store, profiles, task_id, '解释异常线索并引用证据，给出下一步核查方法。', consent=True)
     else:
         _note('分析方式', '规则分析；尚未配置模型，可稍后在主菜单 3 配置并追问')
-    _note('正在分析', '读取日志、匹配规则并生成模拟处置方案…')
+    _note('正在分析', '读取日志、匹配规则并生成防护建议…')
     task = run_task(store, source, collector, protected=protected, demo=demo, analyst=analyst)
     task_detail(store, profiles, task)
 
 
 def add_commands(commands):
-    guard = commands.add_parser('guard', help='真实采集或合成演示，所有防护动作仅模拟')
+    guard = commands.add_parser('guard', help='真实采集或合成演示，仅提供防护建议，不执行处置')
     guard.add_argument('source', choices=['windows', 'linux', 'export', 'demo-linux', 'demo-windows'])
     guard.add_argument('--ssh', help='已有 SSH 别名或 user@主机；省略则读本机 Linux')
     guard.add_argument('--directory', type=Path, help='导出目录，包含 ssh.journal.log')
     guard.add_argument('--minutes', type=int, default=15)
     guard.add_argument('--limit', type=int, default=1000)
     guard.add_argument('--protect', action='append', default=[], help='受保护管理 IP/CIDR，可重复')
-    guard.add_argument('--ttl', type=int, default=600, help='模拟封禁秒数 60–3600')
+    guard.add_argument('--ttl', type=int, default=600, help='建议封禁时长（秒）60–3600')
     guard.add_argument('--cycles', type=int, default=1, help='轮数；0 持续运行，Ctrl+C 停止')
     guard.add_argument('--interval', type=int, default=60, help='轮询间隔秒数，至少 10 秒')
     guard.add_argument('--with-model', action='store_true', help='每轮调用所选模型解释证据')

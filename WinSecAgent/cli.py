@@ -110,9 +110,9 @@ def _menu() -> None:
     print(_style("  工作台", "1"))
     print("    8  首页总览")
     print("    9  后台任务状态")
-    print(_style("  模型与模拟防护", "1"))
+    print(_style("  模型与防护建议", "1"))
     print("   10  模型配置与选择")
-    print("   11  采集分析与模拟防护")
+    print("   11  采集分析与防护建议")
     print("   12  防护任务、证据与追问")
     print("    0  退出")
 
