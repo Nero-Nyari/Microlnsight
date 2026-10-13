@@ -1,2 +1,0 @@
-# Native Linux CLI; journalctl is supplied by the operating system.
-requests>=2.28.0,<3

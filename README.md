@@ -1,58 +1,50 @@
 # Microlnsight
-Microlnsight Server Security Log Monitoring and Analysis with Local Large Language Models
 
-当前仓库包含 **WinSecAgent Windows / Linux 本机 CLI**，以及原有 FastAPI + React 工作台。各平台在需要保护的主机上安装，独立读取、分析和保存本机日志。
+Windows / Linux 本机日志采集与研判原型。当前包含本机 CLI，以及 FastAPI + React 工作台；支持核对原始证据、查看规则线索和导出报告，模型分析为可选功能。
 
-## 本机 CLI 样板 v0.2.1
+## 从这里开始
 
-- 在 [Releases](https://github.com/Nero-Nyari/Microlnsight/releases) 下载 Windows ZIP 或 Linux tar.gz；需要 Python 3.10+。
-- Windows：解压后执行 `install-windows.bat`，使用 `start-windows.bat` 启动。
-- Linux：解压后执行 `sh install-linux.sh`，使用 `sh start-linux.sh` 启动。
-- 菜单支持本机日志分析、任务证据、模型连续追问、本地/API 模型配置，以及检查更新和更新。
-- 处置仅模拟；模拟器检查创建、到期和撤销，不修改真实防火墙，不声称已验证防护效果。
-- 更新保留本机数据，先校验与试运行再切换；失败恢复旧文件。更新源为本仓库的 `cli-vX.Y.Z` 发布版本。
+| 目标 | 入口 |
+| --- | --- |
+| 安装 Windows / Linux 本机 CLI | [安装与使用说明](Microlnsight/NATIVE_CLI.md) · [下载发布包](https://github.com/Nero-Nyari/Microlnsight/releases) |
+| 从源码启动 | [应用目录说明](Microlnsight/README.md) |
+| 开发、运行测试、构建发行包 | [开发与仓库约定](CONTRIBUTING.md) |
+| 使用网页工作台或演示 | [完整开发指南](docs/guides/workbench.md) · [三分钟演示](docs/guides/demo-walkthrough.md) |
+| 查找项目资料和验收记录 | [文档索引](docs/README.md) |
 
-完整步骤和当前限制见 [本机 CLI 安装说明](WinSecAgent/NATIVE_CLI.md)。源码目录可用 `python agent.py` 启动本机版；`python dev.py cli` 保留原 Windows 数据库工作台。
+## 仓库结构
 
-## 当前功能
-
-- 读取 Windows Security、System、Application、Defender 和 PowerShell 日志，支持粘贴文本、JSON、XML。
-- 原始记录先进入日志列表，有证据支持的异常线索再形成告警。正常活动与证据不足均不会被直接描述为入侵。
-- 本地规则按主机、账户、来源 IP 和时间窗口关联登录失败、登录成功和服务创建，展示次数、时间范围、相关原文及缺失证据。
-- 支持配置本地或云端模型进行单条分析；本地联合规则不调用模型。导入不会自动上传日志到模型服务。
-- 页面及 Markdown 报告复用统一研判结论，原始告警等级与分析后风险分别展示。
-
-## 运行与验证
-
-应用位于 [`WinSecAgent/`](WinSecAgent/)。
-
-当前使用的远程仓库为 [Microlnsight](https://github.com/Nero-Nyari/Microlnsight)，应用名称为 WinSecAgent。
-
-```powershell
-git clone https://github.com/Nero-Nyari/Microlnsight.git
-cd Microlnsight/WinSecAgent
+```text
+.
+├── .github/workflows/      # 自动检查与 CLI 发布
+├── docs/                  # 指南、项目说明、验收记录、历史方案
+│   ├── guides/
+│   ├── project/
+│   ├── validation/
+│   └── archive/
+├── Microlnsight/            # 应用目录，启动与开发命令在这里执行
+│   ├── agent.py            # 本机 CLI 入口
+│   ├── NATIVE_CLI.md       # 随 CLI 发行包分发的安装说明
+│   ├── backend/            # API、日志服务、Python 测试与合成样本
+│   ├── frontend/           # React 工作台与前端测试
+│   └── dev.py              # 环境检查、开发启动与测试入口
+├── CONTRIBUTING.md        # 文件放置、开发验证与产物约定
+└── LICENSE
 ```
 
-安装与启动步骤见 [应用说明](WinSecAgent/README.md)。统一入口 `python dev.py start` 使用前端 5173、后端 8000；端口占用时明确报错，请先停止已有服务。
+项目名称为 [Microlnsight](https://github.com/Nero-Nyari/Microlnsight)。应用源码位于 `Microlnsight/`；旧版本的升级兼容与数据迁移步骤见 [0.3.0 名称迁移说明](docs/project/brand-migration.md)。克隆后进入应用目录：
 
-- [Windows 验收记录与测试命令](WinSecAgent/docs/windows-validation.md)
-- [三分钟演示：正常、单次失败、连续失败后成功](WinSecAgent/docs/demo-walkthrough.md)
-- [固定回归样本说明](WinSecAgent/backend/tests/fixtures/README.md)
-- [许可证](LICENSE)
+```sh
+git clone https://github.com/Nero-Nyari/Microlnsight.git
+cd Microlnsight/Microlnsight
+```
 
-## 工作区结构与当前进度
+本机 CLI 需要 Python 3.10+；按平台执行安装与启动脚本。网页工作台还需要 Node.js，详细命令见上面的对应指南。
 
-- `WinSecAgent/backend/`：API、日志采集、关联规则及后端测试。
-- `WinSecAgent/frontend/`：工作台、工具设置和来源切换测试。
-- `WinSecAgent/docs/`：使用说明、演示流程与验收记录。
-- `WinSecAgent/dev.py` / `start.bat`：统一检查、启动及后端测试入口。
+## 功能与验证边界
 
-截至 2026-10-03，用户手动验证已读到 Security 等五个日志通道，重启后网络连接、服务和计划任务列表可显示。计划任务状态和下次运行时间仍待完善。当前异常关联主要由合成样本验证；真实异常日志的采集、关联、证据核对和报告验证仍是下一阶段工作，不能将采集成功视为检测能力验收完成。
+Windows 本机 CLI 读取 Security 日志，Linux 本机 CLI 读取 SSH journal；网页工作台还支持多个 Windows 通道及手动导入。本地规则从已分析的记录中寻找待核查线索，报告保留范围、原文依据与缺失信息。合成样本通过不等于真实检测能力完成验收，时间相邻也不证明因果关系。
 
-## 本地数据与权限
+CLI 处置为模拟，不修改真实防火墙；读取日志取决于运行账户权限，程序不会自动提权。数据库、真实日志、模型密钥、虚拟环境和构建产物保留在本机，不随仓库分发。历史验收及其日期见 [验收记录](docs/validation/windows-validation.md)。
 
-数据库、真实日志、模型密钥、`.env`、虚拟环境及构建产物不随仓库分发。`backend/data/models.example.json` 提供空配置示例，可启动后在模型管理界面添加模型。
-
-Security 通道是否可读取取决于后端 Windows 账户权限。权限不足时只标记该通道，其他成功读取的记录仍可使用。应用不会自动提权；本地联合规则只提供核查建议，不执行封禁、隔离或删除。
-
-本地规则及固定样本验证不等于真实环境的完整检测能力；时间相邻不证明因果关系，未发现线索也不代表整机安全。
+许可证见 [LICENSE](LICENSE)。

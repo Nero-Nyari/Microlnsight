@@ -8,8 +8,8 @@ __pycache__/
 .updates/
 .cli-runtime.lock
 .update-transaction.json
-WinSecAgent/runtime.json
-WinSecAgent/data/
+Microlnsight/runtime.json
+Microlnsight/data/
 venv/
 myenv/
 mayenv/
@@ -28,8 +28,8 @@ dist/
 *.tsbuildinfo
 
 # Local runtime data, credentials and generated artifacts
-WinSecAgent/backend/data/*
-!WinSecAgent/backend/data/models.example.json
+Microlnsight/backend/data/*
+!Microlnsight/backend/data/models.example.json
 *.db
 *.db-*
 *.sqlite
@@ -38,6 +38,7 @@ WinSecAgent/backend/data/*
 *.evtx
 *.etl
 outputs/
+/release-assets/
 
 # IDE
 .vscode/

@@ -21,16 +21,19 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install requests
       - name: Guard contracts
-        working-directory: WinSecAgent
+        working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_guard.py -v
       - name: Native distributions
-        working-directory: WinSecAgent
+        working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_native_cli.py -v
       - name: Update transactions
-        working-directory: WinSecAgent
+        working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_cli_update.py -v
+      - name: Brand migration and old-client upgrades
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_brand_migration.py -v
       - name: Interactive terminal flows
-        working-directory: WinSecAgent
+        working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_terminal_ui.py -v
 
   publish:
@@ -44,7 +47,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Build both native editions
-        working-directory: WinSecAgent
+        working-directory: Microlnsight
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python build_cli_releases.py --version "${RELEASE_TAG#cli-v}" --output ../release-assets
@@ -52,4 +55,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "WinSecAgent CLI $RELEASE_TAG" --generate-notes
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "Microlnsight CLI $RELEASE_TAG" --generate-notes
