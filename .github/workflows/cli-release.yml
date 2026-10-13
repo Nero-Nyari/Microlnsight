@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install requests
+      - run: python -m pip install requests "prompt-toolkit>=3.0.52,<4"
       - name: Guard contracts
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_guard.py -v
@@ -35,6 +35,9 @@ jobs:
       - name: Interactive terminal flows
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_terminal_ui.py -v
+      - name: Full-screen terminal layout and flows
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_tui.py -v
 
   publish:
     needs: validate

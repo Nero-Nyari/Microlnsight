@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import redirect_stdout
+from datetime import datetime
 import os
 from pathlib import Path
 import re
@@ -19,16 +20,16 @@ from prompt_toolkit.layout import (
     ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window,
 )
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.utils import get_cwidth
 
 import guard_cli
-from guard import demo_events, run_task
+from guard import demo_events, run_task, task_assessment
 from terminal_ui import Cancelled, input_handler, model_answer, output_width
 
 
@@ -38,17 +39,19 @@ COMMANDS = {
     '/details': '当前任务详情与导出', '/status': '查看模型诊断',
     '/parameters': '模型参数', '/check-update': '检查更新',
     '/update': '更新并退出', '/clear': '清空当前屏幕',
+    '/home': '返回首页，保留当前任务', '/workspace': '查看工作区与数据目录',
     '/sidebar': '显示 / 隐藏侧栏', '/help': '查看全部命令', '/exit': '退出',
 }
 ALIASES = dict(zip('1234560', ('/scan', '/tasks', '/models', '/demo', '/check-update', '/update', '/exit')))
 
 STYLE = Style.from_dict({
-    '': 'bg:#17191f #d6dae4',
-    'header': 'bg:#20232c #9da6b8', 'brand': '#cad7ff bold',
-    'accent': '#96b5ff', 'muted': '#8d95a7', 'title': '#e1e7f5 bold',
-    'sidebar': 'bg:#1d2028 #a5aec0', 'input': 'bg:#252a35 #eef1f7',
-    'input-label': 'bg:#252a35 #a8c1ff bold',
-    'footer': '#8d95a7', 'ok': '#9bcda6', 'warning': '#ebc68e', 'error': '#ee9eaa',
+    '': '#dce2ec',
+    'surface': 'bg:#161b22 #dce2ec',
+    'header': 'bg:#222b38 #bac8dc', 'brand': '#e6efff bold',
+    'accent': '#87c7ff', 'muted': '#a9b5c6', 'title': '#eef4ff bold',
+    'sidebar': 'bg:#1e2633 #dce2ec', 'input': 'bg:#273448 #f0f5ff',
+    'input-label': 'bg:#273448 #aedaff bold',
+    'footer': '#a9b5c6', 'ok': '#a2d9b1', 'warning': '#f0cd91', 'error': '#ffacb8',
     'user': '#a8c1ff bold', 'completion-menu': 'bg:#2b303c #cbd3e3',
     'completion-menu.completion.current': 'bg:#465570 #ffffff',
     'completion-menu.meta.completion': 'bg:#242832 #aab3c5',
@@ -61,6 +64,48 @@ def safe_text(value):
     """External text remains literal; never interpret terminal escape sequences."""
     return re.sub(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]',
                   lambda m: f'\\x{ord(m.group()):02x}', str(value))
+
+
+def fit_line(value, width):
+    """Bound labels by terminal cells, including CJK and literal control text."""
+    text = safe_text(value).replace('\n', ' ').replace('\t', ' ')
+    if get_cwidth(text) <= width:
+        return text
+    result, used = '', 0
+    for char in text:
+        cells = get_cwidth(char)
+        if used + cells > max(0, width - 1):
+            break
+        result += char
+        used += cells
+    return result + '…'
+
+
+def task_source(task):
+    source = str(task.get('source', ''))
+    if task.get('demo') or source.startswith('demo:'):
+        return '合成演示'
+    return {'windows-local': 'Windows 日志', 'linux-local': 'Linux SSH'}.get(
+        source, '导入日志' if source.startswith('export:') else '日志任务')
+
+
+def task_time(task):
+    try:
+        return datetime.fromisoformat(task['created'].replace('Z', '+00:00')).astimezone().strftime('%m-%d %H:%M')
+    except (KeyError, TypeError, ValueError):
+        return '时间未知'
+
+
+def task_result(task):
+    assessment = task_assessment(task)
+    label = {
+        'failed': '未完成 · 失败', 'interrupted': '未完成 · 中断',
+        'pending': '采集中', 'findings': f"待核查线索 {len(task.get('findings', []))} 条",
+        'insufficient_data': '数据不足', 'no_findings': '已分析范围内无线索',
+    }[assessment['status']]
+    if assessment['scope_incomplete']:
+        label += ' · 范围不完整'
+    return label
 
 
 class MessageLexer(Lexer):
@@ -125,39 +170,30 @@ class Workbench:
         self.sidebar = True
         self.loop = None
         self.model = '规则分析 · 未配置模型'
+        self.has_model = False
+        self.selected_task = None
         self.recent = []
         self.refresh_context()
 
-        self.messages = TextArea(read_only=True, scrollbar=True, wrap_lines=True, lexer=MessageLexer())
+        self.messages = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
+                                 style='class:surface', lexer=MessageLexer())
         self.editor = TextArea(
-            height=Dimension(min=1, preferred=3, max=3), multiline=True,
+            height=Dimension(min=1, preferred=2, max=2), multiline=True,
             prompt=' › ', style='class:input',
             password=Condition(lambda: self.secret),
             read_only=Condition(lambda: self.running and not self.pending),
             completer=WordCompleter(list(COMMANDS), meta_dict=COMMANDS, sentence=True),
             complete_while_typing=Condition(lambda: not self.pending and self.editor.text.startswith('/')),
         )
-        welcome = HSplit([
-            Window(height=Dimension(min=0, weight=1)),
-            Window(FormattedTextControl([('class:brand', 'W I N S E C'), ('class:accent', '  /  AGENT')]), height=2, align=WindowAlign.CENTER),
-            Window(FormattedTextControl('本机日志研判工作台'), height=2, align=WindowAlign.CENTER, style='class:title'),
-            Window(FormattedTextControl('从一份日志开始，找到可以核查的证据。'), height=2, align=WindowAlign.CENTER, style='class:muted'),
-            Window(FormattedTextControl([('class:accent', '/scan'), ('', '  本机分析     '), ('class:accent', '/demo'), ('', '  体验演示')]), height=2, align=WindowAlign.CENTER),
-            Window(FormattedTextControl([('class:accent', '/tasks'), ('', '  历史任务     '), ('class:accent', '/models'), ('', '  选择模型')]), height=2, align=WindowAlign.CENTER),
-            Window(FormattedTextControl('先运行分析，再围绕当前任务直接提问。'), height=2, align=WindowAlign.CENTER, style='class:muted'),
-            Window(height=Dimension(min=0, weight=1)),
-        ], padding=0)
+        # One painted surface: empty cells and text inherit the same background.
+        welcome = Window(FormattedTextControl(self.home_text), style='class:surface')
         content = HSplit([
-            ConditionalContainer(welcome, Condition(lambda: not self.messages.text and self.app.output.get_size().rows >= 24)),
-            ConditionalContainer(Window(FormattedTextControl(
-                '\nMicrolnsight\n\n/scan 分析    /demo 演示\n/tasks 任务   /models 模型\n'),
-                align=WindowAlign.CENTER, wrap_lines=True, style='class:brand'),
-                Condition(lambda: not self.messages.text and self.app.output.get_size().rows < 24)),
+            ConditionalContainer(welcome, Condition(lambda: not self.messages.text)),
             ConditionalContainer(self.messages, Condition(lambda: bool(self.messages.text))),
         ])
         sidebar = ConditionalContainer(
-            Window(FormattedTextControl(self.sidebar_text), width=29, style='class:sidebar', wrap_lines=True),
-            Condition(lambda: self.sidebar and self.app.output.get_size().columns >= 105),
+            Window(FormattedTextControl(self.sidebar_text), width=34, style='class:sidebar'),
+            Condition(self.show_sidebar),
         )
         body = VSplit([Window(width=2), content, Window(width=2), sidebar])
         root = HSplit([
@@ -167,7 +203,7 @@ class Workbench:
             Window(FormattedTextControl(self.input_title), height=Dimension(min=1, max=4), dont_extend_height=True, wrap_lines=True, style='class:input-label'),
             self.editor,
             Window(FormattedTextControl(self.footer), height=1, style='class:footer'),
-        ])
+        ], style='class:surface')
         keys = KeyBindings()
 
         @keys.add('enter')
@@ -216,25 +252,95 @@ class Workbench:
 
     def refresh_context(self):
         data = self.profiles.load()
+        self.has_model = bool(data['active'])
+        self.model = '未配置 · 可先使用规则分析'
         if data['active']:
             self.model = safe_text(data['active'] + ' / ' + data['profiles'][data['active']]['model'])
         self.recent = self.store.recent(5)
+        self.selected_task = self.store.get(self.task_id) if self.task_id else None
+
+    def show_sidebar(self):
+        size = self.app.output.get_size()
+        return self.sidebar and size.columns >= 120 and size.rows >= 26
+
+    def content_width(self):
+        return max(1, self.app.output.get_size().columns - 4 - (34 if self.show_sidebar() else 0))
+
+    def home_text(self):
+        size = self.app.output.get_size()
+        compact = size.rows < 26
+        width = self.content_width()
+        rows = []
+
+        def line(text='', style=''):
+            rows.append((style, fit_line(text, width) + '\n'))
+
+        if not compact:
+            line()
+        line('Microlnsight  /  日志研判', 'class:brand')
+        if not compact:
+            line('从本机日志开始，核对证据，再继续追问。', 'class:muted')
+        line()
+        line('开始工作', 'class:title')
+        line('/scan    分析本机日志', 'class:accent')
+        line('/demo    体验合成演示', 'class:accent')
+        line('/tasks   打开历史任务', 'class:accent')
+        line('/models  配置或切换模型', 'class:accent')
+        if size.rows < 22:
+            return rows
+        line()
+        if self.selected_task:
+            line('继续当前任务  ·  ' + task_source(self.selected_task), 'class:title')
+            line(task_result(self.selected_task), 'class:warning')
+            line('/details 查看证据与导出；在下方继续提问。', 'class:muted')
+        else:
+            line('最近任务  ·  /tasks 选择打开', 'class:title')
+            if not self.recent:
+                line('暂无任务。输入 /scan 开始，或用 /demo 体验。', 'class:muted')
+            for task in self.recent[:1 if compact else min(3, max(1, (size.rows - 22) // 3))]:
+                line(f'{task_time(task)}  ·  {task_source(task)}')
+                line('  ' + task_result(task), 'class:muted')
+        if not compact:
+            line()
+            line('仅读取与分析日志，防护建议尚未执行。', 'class:muted')
+        return rows
 
     def header(self):
         return [('class:brand', '  Microlnsight'), ('', f'  /  {self.system.title()} 本机版'),
-                ('class:muted', '     LOCAL WORKSPACE' if self.app.output.get_size().columns >= 85 else '')]
+                ('class:muted', '     日志 · 证据 · 研判' if self.app.output.get_size().columns >= 85 else '')]
 
     def sidebar_text(self):
-        rows = [('class:title', '\n  工作区\n\n'), ('', f'  {self.system.title()} · 本机分析\n'),
-                ('class:muted', '\n  当前模型\n'), ('', '  ' + self.model + '\n'),
-                ('class:muted', '\n  当前任务\n'), ('', '  ' + (self.task_id or '尚未选择') + '\n'),
-                ('class:muted', '\n  最近任务\n')]
-        for task in self.recent:
-            rows.append(('', f"  {safe_text(task['id'])}\n"))
-        if not self.recent:
-            rows.append(('', '  尚无任务，试试 /demo\n'))
-        rows.extend([('class:muted', '\n  数据目录\n'), ('', '  ' + safe_text(self.data_dir) + '\n'),
-                     ('class:warning', '\n  防护建议尚未执行\n'), ('class:muted', '  结论请结合原文核查\n')])
+        rows = []
+
+        def line(text='', style=''):
+            rows.append((style, '  ' + fit_line(text, 30) + '\n'))
+
+        line()
+        line('工作区', 'class:title')
+        line(self.system.title() + ' · 本机分析')
+        line('日志权限将在采集时检查', 'class:muted')
+        line()
+        line('当前模型', 'class:muted')
+        # Split profile and model instead of wrapping a long identifier arbitrarily.
+        for part in self.model.split(' / ', 1):
+            line(part)
+        line('/models 管理模型', 'class:accent')
+        line()
+        line('当前任务', 'class:title')
+        task = self.selected_task
+        if task:
+            line(task_source(task) + ' · ' + task_time(task))
+            line(task_result(task).split(' · ')[0], 'class:warning')
+            if task_assessment(task)['scope_incomplete']:
+                line('分析范围不完整', 'class:warning')
+            line('/details 证据与导出', 'class:accent')
+        else:
+            line('尚未选择任务', 'class:muted')
+            line('/scan 开始本机分析', 'class:accent')
+            line('/tasks 打开历史任务', 'class:accent')
+        line()
+        line('防护建议尚未执行', 'class:warning')
+        line('/workspace 工作区详情', 'class:muted')
         return rows
 
     def status(self):
@@ -242,17 +348,26 @@ class Workbench:
             elapsed = int(time.monotonic() - self.started)
             label = '等待输入' if self.pending else '处理中'
             return f'  {"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 5) % 10]} {label} · {elapsed} 秒' + (' · 完成当前操作后退出' if self.exit_after else '')
-        return f'  ● 就绪   {self.model}' + (f'   · 任务 {self.task_id}' if self.task_id else '')
+        label = '任务已选择' if self.task_id else '等待开始'
+        return '  ' + fit_line(f'● {label}   ·   {self.model}', self.app.output.get_size().columns - 2)
 
     def input_title(self):
-        return '  ' + (self.prompt if self.pending else '提问或输入 /命令')
+        if self.pending:
+            return '  ' + self.prompt
+        if self.running:
+            return '  正在处理 · Ctrl+C 取消当前操作'
+        if not self.task_id:
+            return '  输入 /scan 开始，或 /tasks 打开任务'
+        if not self.has_model:
+            return '  /details 查看证据 · /models 配置模型后提问'
+        return '  围绕当前任务提问，或输入 /命令'
 
     def footer(self):
         if self.pending:
             return '  Enter 确认   Ctrl+C 取消   ' + ('密钥已隐藏，不记录输入' if self.secret else '回车采用提示中的默认值')
         if self.app.output.get_size().columns < 90:
-            return '  Enter 发送 · F1 帮助 · Ctrl+Q 退出'
-        return '  Enter 发送   Alt+Enter 换行   Tab 补全   PgUp/PgDn 滚动   F1 帮助   Ctrl+Q 退出'
+            return '  Enter 提交 · F1 帮助 · Ctrl+Q 退出'
+        return '  Enter 提交   Tab 补全   Alt+Enter 换行   PgUp/PgDn 滚动   F1 帮助   Ctrl+Q 退出'
 
     def append(self, value):
         if re.fullmatch('─+', value):
@@ -319,8 +434,12 @@ class Workbench:
         command = ALIASES.get(value, value)
         if command == '/exit':
             self.request_exit()
-        elif command == '/clear':
+        elif command in ('/clear', '/home'):
             self.messages.text = ''
+        elif command == '/workspace':
+            self.append(f'\n工作区详情\n  平台：{self.system.title()}\n  模型：{self.model}\n'
+                        f'  数据目录：{self.data_dir}\n  当前任务：{self.task_id or "尚未选择"}\n'
+                        '  日志权限：采集时检查\n  防护建议尚未执行\n\n')
         elif command == '/sidebar':
             self.sidebar = not self.sidebar
         elif command == '/help':
@@ -346,8 +465,7 @@ class Workbench:
 
     def worker(self, command):
         token = input_handler.set(self.read_input)
-        width_token = output_width.set(lambda: self.app.output.get_size().columns - 5 -
-                                       (29 if self.sidebar and self.app.output.get_size().columns >= 105 else 0))
+        width_token = output_width.set(lambda: max(1, self.content_width() - 1))
         try:
             with redirect_stdout(WorkerOutput(self, sys.stdout)):
                 try:
@@ -380,7 +498,8 @@ class Workbench:
                 print('暂无任务；使用 /scan 或 /demo 创建任务。')
                 return
             for i, task in enumerate(tasks, 1):
-                print(f"  {i}  {task['id']}  {task['source']}  {guard_cli.STATES.get(task['status'], task['status'])}")
+                print(f"  {i}  {task_time(task)} · {task_source(task)}")
+                print(f"     {task_result(task)} · {task['id']}")
             selected = guard_cli.choice('选择任务序号（0 返回）', tuple(str(i) for i in range(1, len(tasks) + 1)))
             self.task_id = tasks[int(selected) - 1]['id']
             guard_cli.show(self.store.get(self.task_id))

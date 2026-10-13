@@ -117,7 +117,7 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(screen)
         rendered = '\n'.join(''.join(cell.char for x, cell in sorted(row.items()) if x < 60)
                              for y, row in sorted(screen.data_buffer.items()) if y < 24)
-        self.assertIn('提问或输入', rendered)
+        self.assertIn('输入 /scan', rendered)
         self.assertNotIn('最近任务', rendered)
         self.assertNotIn('\x1b', self.ui.messages.text)
         self.assertIn('\\x1b', self.ui.messages.text)
@@ -152,8 +152,57 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         text = '\n'.join(''.join(cell.char for x, cell in sorted(row.items()) if x < 40)
                          for y, row in sorted(screen.data_buffer.items()) if y < 18)
         self.assertIn('/demo', text)
-        self.assertIn('提问或输入', text)
+        self.assertIn('输入 /scan', text)
         self.assertIn('Ctrl+Q', text)
+
+    async def test_home_background_is_continuous_across_sizes(self):
+        for columns, rows in ((200, 45), (120, 30), (80, 24), (40, 18)):
+            with self.subTest(columns=columns, rows=rows):
+                self.ui.app.output.get_size = lambda: Size(rows=rows, columns=columns)
+                self.ui.app.invalidate()
+                await asyncio.sleep(.08)
+                screen = self.ui.app.renderer.last_rendered_screen
+                rendered = '\n'.join(''.join(screen.data_buffer[y][x].char for x in range(columns))
+                                     for y in range(rows))
+                self.assertIn('Microlnsight', rendered)
+                self.assertNotIn('W I N S E C', rendered)
+                self.assertIn('/scan', rendered)
+                self.assertIn('/models', rendered)
+                self.assertIn('Ctrl+Q', rendered)
+                # Check both text cells and padding: the original stripes were
+                # caused by differing backgrounds in these two kinds of cell.
+                for y in range(1, rows - 7):
+                    for x in range(2, self.ui.content_width() + 2):
+                        cell = screen.data_buffer[y][x]
+                        attrs = self.ui.app._merged_style.get_attrs_for_style_str(cell.style)
+                        self.assertEqual(attrs.bgcolor, '161b22', (x, y, cell.char))
+
+    async def test_home_summaries_and_contextual_input(self):
+        await self.command('/demo')
+        task_id = self.ui.task_id
+        self.assertIn('/models', self.ui.input_title())
+        await self.command('/home')
+        self.assertEqual(self.ui.messages.text, '')
+        self.assertEqual(self.ui.task_id, task_id)
+        self.assertIn('继续当前任务', ''.join(t for _, t in self.ui.home_text()))
+        self.ui.task_id = None
+        self.ui.refresh_context()
+        self.ui.app.output.get_size = lambda: Size(rows=40, columns=150)
+        home = ''.join(t for _, t in self.ui.home_text())
+        self.assertIn('合成演示', home)
+        self.assertIn('待核查线索', home)
+        self.assertNotIn(task_id, home)
+        self.assertNotIn(str(self.ui.data_dir), ''.join(t for _, t in self.ui.sidebar_text()))
+        await self.command('/workspace')
+        self.assertIn(str(self.ui.data_dir), self.ui.messages.text)
+
+    async def test_long_labels_stay_inside_sidebar(self):
+        self.ui.model = '配置\x1b[2J / ' + '长模型名称' * 30
+        sidebar = self.ui.sidebar_text()
+        for _, text in sidebar:
+            self.assertLessEqual(tui.get_cwidth(text.rstrip('\n')), 32)
+        self.assertNotIn('\x1b', ''.join(t for _, t in sidebar))
+        self.assertIn('…', ''.join(t for _, t in sidebar))
 
 
 if __name__ == '__main__':
