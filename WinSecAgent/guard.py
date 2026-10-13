@@ -371,6 +371,9 @@ def run_task(store, source, collector, protected=(), ttl=600, demo=False, analys
                 task['stages'].append(dict(stage='model', status='complete'))
             except (ValueError, OSError, RuntimeError) as exc:
                 task['model_error'] = str(exc)
+                from guard_models import ModelError
+                if isinstance(exc, ModelError):
+                    task['model_diagnostic'] = exc.diagnostic
                 task['stages'].append(dict(stage='model', status='failed'))
                 task['warnings'].append('模型未完成；以下模拟方案仅依据固定规则，不能视为模型分析成功')
         else:

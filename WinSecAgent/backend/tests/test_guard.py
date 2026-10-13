@@ -147,6 +147,102 @@ class GuardTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def response(self, payload, status=200):
+        response = Mock(status_code=status)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.iter_content.return_value = [json.dumps(payload).encode()]
+        return response
+
+    def test_old_deepseek_profile_gets_safe_defaults_without_altering_other_providers(self):
+        profile = dict(kind='openai', base_url='https://api.deepseek.com', model='deepseek-v4-pro')
+        response = self.response({'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]})
+        with patch('requests.post', return_value=response) as post:
+            models.generate(profile, 'private-key', [])
+            body = post.call_args.kwargs['json']
+            self.assertEqual(body['thinking'], {'type': 'disabled'})
+            self.assertEqual(body['max_tokens'], 4096)
+            models.generate({**profile, 'thinking': 'enabled'}, '', [])
+            self.assertEqual(post.call_args.kwargs['json']['max_tokens'], 16384)
+            models.generate({**profile, 'base_url': 'https://api.deepseek.com.example/v1'}, '', [])
+            self.assertNotIn('thinking', post.call_args.kwargs['json'])
+
+    def test_model_parameter_bounds_and_no_foreign_provider_thinking_flags(self):
+        profile = dict(kind='openai', base_url='https://example.com/v1', model='test')
+        for extra in ({'max_tokens': 0}, {'max_tokens': True}, {'max_tokens': 65537},
+                      {'timeout_seconds': 601}, {'thinking': 'enabled'}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                models.validate({**profile, **extra})
+
+    def test_finish_reasons_empty_answers_and_malformed_responses_are_distinct(self):
+        profile = dict(kind='openai', base_url='https://api.deepseek.com', model='deepseek-v4-pro')
+        cases = [
+            ({'choices': [{'message': {'content': '', 'reasoning_content': 'private-reasoning'}, 'finish_reason': 'length'}]}, 'output_limit'),
+            ({'choices': [{'message': {'content': 'incomplete answer'}, 'finish_reason': 'length'}]}, 'output_limit'),
+            ({'choices': [{'message': {'content': '', 'reasoning_content': 'private-reasoning'}, 'finish_reason': 'stop'}]}, 'reasoning_without_answer'),
+            ({'choices': [{'message': {'content': ''}, 'finish_reason': 'stop'}]}, 'empty_answer'),
+            ({'choices': [{'message': {'content': 'partial'}, 'finish_reason': 'content_filter'}]}, 'unfinished_response'),
+            ({'choices': [{'message': {'content': None}, 'finish_reason': 'tool_calls'}]}, 'unfinished_response'),
+            ({'choices': []}, 'invalid_structure'),
+            ([], 'invalid_structure'),
+        ]
+        for payload, code in cases:
+            with self.subTest(code=code), patch('requests.post', return_value=self.response(payload)) as post:
+                with self.assertRaises(models.ModelError) as caught:
+                    models.generate(profile, 'private-key', [])
+                self.assertEqual(caught.exception.diagnostic['code'], code)
+                self.assertNotIn('private-reasoning', str(caught.exception.diagnostic))
+                self.assertNotIn('private-key', str(caught.exception))
+                post.assert_called_once()
+
+    def test_invalid_json_http_timeout_and_network_errors_have_safe_diagnostics(self):
+        import requests
+        profile = dict(kind='openai', base_url='https://api.deepseek.com', model='test')
+        response = self.response({}, 401)
+        with patch('requests.post', return_value=response), self.assertRaises(models.ModelError) as caught:
+            models.generate(profile, 'secret', [])
+        self.assertEqual(caught.exception.diagnostic, {'code': 'http_error', 'http_status': 401})
+        response.status_code = 200
+        response.iter_content.return_value = [b'<html>private proxy response</html>']
+        with patch('requests.post', return_value=response), self.assertRaises(models.ModelError) as caught:
+            models.generate(profile, '', [])
+        self.assertEqual(caught.exception.diagnostic['code'], 'invalid_json')
+        for error, code in [(requests.Timeout('private-url'), 'timeout'), (requests.ConnectionError('private-url'), 'connection_error')]:
+            with patch('requests.post', side_effect=error), self.assertRaises(models.ModelError) as caught:
+                models.generate(profile, '', [])
+            self.assertEqual(caught.exception.diagnostic['code'], code)
+            self.assertNotIn('private-url', str(caught.exception))
+
+    def test_failure_metadata_is_persisted_and_sent_on_followup_without_failed_answer(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / 'backend/data') as directory:
+            store = guard.TaskStore(Path(directory) / 'tasks.db')
+            task = guard.run_task(store, 'demo', lambda: guard.demo_events('linux'))
+            profiles = models.Profiles(Path(directory) / 'models.json')
+            profiles.put('local', dict(kind='ollama', base_url='http://localhost:11434', model='test'))
+            payload = {'message': {'content': '', 'thinking': 'private-reasoning'}, 'done_reason': 'length',
+                       'usage': {'completion_tokens': 1200, 'completion_tokens_details': {'reasoning_tokens': 1200}}}
+            with patch('requests.post', return_value=self.response(payload)), self.assertRaises(models.ModelError):
+                models.ask(store, profiles, task['id'], 'explain')
+            self.assertEqual(store.history(task['id']), [])
+            diagnostic = models.context(store.get(task['id']))['model_diagnostic']
+            self.assertEqual(diagnostic['completion_tokens'], 1200)
+            self.assertEqual(diagnostic['reasoning_tokens'], 1200)
+            self.assertNotIn('private-reasoning', json.dumps(store.get(task['id'])))
+            with patch('guard_models.generate', return_value='ok') as generate:
+                models.ask(store, profiles, task['id'], 'why failed?')
+            self.assertIn('output_limit', str(generate.call_args.args[2]))
+            self.assertEqual(store.get(task['id'])['last_model_diagnostic'], {'code': 'success'})
+
+    def test_automatic_analysis_keeps_model_diagnostics_without_marking_model_success(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / 'backend/data') as directory:
+            store = guard.TaskStore(Path(directory) / 'tasks.db')
+            def analyst(task_id):
+                raise models.ModelError('output stopped', 'output_limit', finish_reason='length')
+            task = guard.run_task(store, 'demo', lambda: guard.demo_events('linux'), analyst=analyst)
+            self.assertEqual(task['model_diagnostic']['code'], 'output_limit')
+            self.assertNotIn('model_answer', task)
+            self.assertEqual(task['status'], 'completed_simulation')
+
     def test_local_without_key_and_keys_never_saved(self):
         with tempfile.TemporaryDirectory(dir=ROOT / 'backend' / 'data') as directory:
             profiles = models.Profiles(Path(directory) / 'models.json')

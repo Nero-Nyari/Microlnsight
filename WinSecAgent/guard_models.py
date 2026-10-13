@@ -16,6 +16,10 @@ SYSTEM = '''你是 WinSecAgent 运维分析助手。用中文解释日志、引�
 区分事实、推测和建议；不要要求用户提供密码、私钥、API Key。'''
 
 
+def deepseek(profile):
+    return profile.get('kind') == 'openai' and urlsplit(profile.get('base_url', '')).hostname == 'api.deepseek.com'
+
+
 def validate(profile):
     if profile.get('kind') not in ('ollama', 'openai'):
         raise ValueError('接口类型应为 ollama 或 openai（兼容接口）')
@@ -30,7 +34,44 @@ def validate(profile):
         raise ValueError('API Key 环境变量名格式错误')
     if not is_loopback(profile) and profile['kind'] == 'openai' and url.scheme != 'https':
         raise ValueError('非本机 API Key 接口必须使用 HTTPS')
-    return {k: profile.get(k, '') for k in ('kind', 'base_url', 'model', 'key_env')}
+    result = {k: profile.get(k, '') for k in ('kind', 'base_url', 'model', 'key_env')}
+    thinking = profile.get('thinking', 'disabled' if deepseek(profile) else 'auto')
+    if thinking not in ('auto', 'disabled', 'enabled') or (thinking != 'auto' and not deepseek(profile)):
+        raise ValueError('思考模式开关目前仅适用于 DeepSeek 官方接口；其他服务保留 auto')
+    result['thinking'] = thinking
+    for name, default, low, high in (('max_tokens', 16384 if thinking == 'enabled' else 4096, 256, 65536),
+                                     ('timeout_seconds', 180, 10, 600)):
+        value = profile.get(name, default)
+        if type(value) is not int or not low <= value <= high:
+            raise ValueError(f'{name} 应为 {low}–{high} 的整数')
+        result[name] = value
+    return result
+
+
+class ModelError(RuntimeError):
+    """Only allowlisted metadata is retained, never response bodies or reasoning."""
+    def __init__(self, message, code, **diagnostic):
+        super().__init__(message)
+        self.diagnostic = dict(code=code, **diagnostic)
+
+
+def response_diagnostic(payload, item, message):
+    result = dict(has_reasoning=bool(message.get('reasoning_content') or message.get('thinking')),
+                  answer_chars=len(message['content']) if isinstance(message.get('content'), str) else 0)
+    finish = item.get('finish_reason', payload.get('done_reason'))
+    if finish in ('stop', 'length', 'content_filter', 'tool_calls', 'insufficient_system_resource', 'aborted'):
+        result['finish_reason'] = finish
+    elif finish is not None:
+        result['finish_reason'] = 'unknown'
+    usage = payload.get('usage')
+    if isinstance(usage, dict):
+        for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+            if type(usage.get(name)) is int and usage[name] >= 0:
+                result[name] = usage[name]
+        details = usage.get('completion_tokens_details')
+        if isinstance(details, dict) and type(details.get('reasoning_tokens')) is int and details['reasoning_tokens'] >= 0:
+            result['reasoning_tokens'] = details['reasoning_tokens']
+    return result
 
 
 def is_loopback(profile):
@@ -129,6 +170,10 @@ def context(task):
                    findings=[{k: v for k, v in f.items() if k not in ('identities', 'refs')} | {'refs': f['refs'][:10]}
                              for f in task.get('findings', [])[:10]],
                    warnings=task.get('warnings', [])[:10], evidence=[])
+    # Diagnostics contain fixed error codes and numeric/boolean metadata only.
+    diagnostic = task.get('last_model_diagnostic') or task.get('model_diagnostic')
+    if diagnostic:
+        payload['model_diagnostic'] = diagnostic
     for row in chosen:
         item = {k: row[k] for k in ('ref', 'platform', 'host', 'account', 'ip', 'kind', 'time')}
         item['raw'] = row['raw'][:600]
@@ -161,32 +206,62 @@ def generate(profile, key, chat):
     body = dict(model=profile['model'], messages=chat, stream=False)
     if profile['kind'] == 'ollama':
         url = base + '/api/chat'
-        body['options'] = {'num_predict': 1200}
+        body['options'] = {'num_predict': profile['max_tokens']}
     else:
         url = base + '/chat/completions'
-        body['max_tokens'] = 1200
+        body['max_tokens'] = profile['max_tokens']
+        if deepseek(profile) and profile['thinking'] != 'auto':
+            body['thinking'] = {'type': profile['thinking']}
     try:
-        with requests.post(url, json=body, headers=headers, timeout=(10, 90),
+        with requests.post(url, json=body, headers=headers, timeout=(10, profile['timeout_seconds']),
                            allow_redirects=False, stream=True) as response:
             if response.status_code != 200:
-                raise RuntimeError(f'模型请求失败：HTTP {response.status_code}；请核对地址、模型和密钥')
+                tips = {401: '密钥无效或未提供', 403: '账号或模型访问被拒绝',
+                        402: '请检查账户余额', 404: '请核对服务地址和模型名称',
+                        429: '请求频率或额度受限，请稍后重试'}
+                tip = tips.get(response.status_code, '请核对服务状态与请求参数')
+                raise ModelError(f'模型请求失败：HTTP {response.status_code}；{tip}',
+                                 'http_error', http_status=response.status_code)
             data = bytearray()
             for chunk in response.iter_content(8192):
                 data.extend(chunk)
                 if len(data) > 1024 * 1024:
-                    raise RuntimeError('模型响应超过 1 MiB，已停止读取')
-            payload = json.loads(data)
-        if profile['kind'] == 'ollama':
-            answer = payload['message']['content']
-        else:
-            answer = payload['choices'][0]['message']['content']
+                    raise ModelError('模型响应超过 1 MiB，已停止读取', 'response_too_large')
+            try:
+                payload = json.loads(data)
+            except ValueError as exc:
+                raise ModelError('模型接口没有返回有效 JSON；请核对接口地址或代理服务', 'invalid_json') from exc
+        try:
+            if profile['kind'] == 'ollama':
+                item, message = {}, payload['message']
+            else:
+                item = payload['choices'][0]
+                message = item['message']
+            if not isinstance(payload, dict) or not isinstance(item, dict) or not isinstance(message, dict):
+                raise TypeError('invalid response structure')
+            diagnostic = response_diagnostic(payload, item, message)
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise ModelError('模型返回结构不兼容，缺少预期的回答字段', 'invalid_structure') from exc
+        finish = diagnostic.get('finish_reason')
+        if finish == 'length':
+            raise ModelError('模型达到输出上限，未取得完整回答；请在模型参数中提高额度，或关闭 DeepSeek 思考模式',
+                             'output_limit', **diagnostic)
+        if finish in ('content_filter', 'tool_calls', 'insufficient_system_resource', 'aborted', 'unknown'):
+            tips = {'content_filter': '模型服务拦截了回答', 'tool_calls': '模型返回工具调用，本入口仅支持文字解释',
+                    'insufficient_system_resource': '模型服务资源不足', 'aborted': '模型服务中断了生成',
+                    'unknown': '模型返回未知结束原因，未视为完整回答'}
+            raise ModelError(tips[finish], 'unfinished_response', **diagnostic)
+        answer = message.get('content')
         if not isinstance(answer, str) or not answer.strip():
-            raise ValueError('empty')
+            if diagnostic['has_reasoning']:
+                raise ModelError('模型返回了思考内容，但没有最终答案；请关闭思考模式或提高输出额度后重试',
+                                 'reasoning_without_answer', **diagnostic)
+            raise ModelError('模型返回的最终答案为空；请检查所选模型是否支持此对话接口', 'empty_answer', **diagnostic)
         return answer.strip()
+    except requests.Timeout as exc:
+        raise ModelError('模型连接或读取等待超时；可在模型参数中调整等待时间。未自动重试或切换模型', 'timeout') from exc
     except requests.RequestException as exc:
-        raise RuntimeError('模型连接失败或超时；未切换模型。请核对服务状态与网络') from exc
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError('模型返回格式无效或回答为空；未生成替代回答') from exc
+        raise ModelError('模型网络连接失败；请检查网络和模型服务，未自动重试或切换模型', 'connection_error') from exc
 
 
 def ask(store, profiles, task_id, question, consent=False):
@@ -195,7 +270,14 @@ def ask(store, profiles, task_id, question, consent=False):
         raise ValueError('非本机模型需要确认发送本任务证据摘要和最近对话')
     task = store.get(task_id)
     chat = messages(task, question, store.history(task_id))
-    answer = generate(profile, profiles.key(name, profile), chat)
+    try:
+        answer = generate(profile, profiles.key(name, profile), chat)
+    except ModelError as exc:
+        task['last_model_diagnostic'] = exc.diagnostic
+        store.save(task)
+        raise
+    task['last_model_diagnostic'] = {'code': 'success'}
+    store.save(task)
     store.message(task_id, 'user', question, name)
     store.message(task_id, 'assistant', answer, name)
     return answer

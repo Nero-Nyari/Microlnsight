@@ -71,6 +71,41 @@ class TerminalTests(unittest.TestCase):
         self.configure(['2', '1'])
         self.assertEqual(self.profiles.active()[0], 'local')
 
+    def test_model_parameters_preserve_session_key_and_validate_each_field(self):
+        self.profiles.put('deepseek', dict(kind='openai', base_url='https://api.deepseek.com', model='deepseek-v4-pro'), 'session-secret')
+        with patch('builtins.input', side_effect=['2', 'bad', '16384', '180', '']), redirect_stdout(io.StringIO()):
+            guard_cli.model_parameters(self.profiles)
+        name, profile = self.profiles.active()
+        self.assertEqual((profile['thinking'], profile['max_tokens']), ('enabled', 16384))
+        self.assertEqual(self.profiles.key(name, profile), 'session-secret')
+        self.assertNotIn('session-secret', self.profiles.path.read_text())
+        saved = self.profiles.path.read_bytes()
+        with patch('builtins.input', side_effect=['1', '0']), redirect_stdout(io.StringIO()):
+            guard_cli.model_parameters(self.profiles)
+        self.assertEqual(saved, self.profiles.path.read_bytes())
+
+    def test_session_consent_is_explicit_and_expires_when_leaving_chat(self):
+        store = guard.TaskStore(Path(self.temp.name) / 'tasks.db')
+        task = guard.run_task(store, 'demo:linux', lambda: guard.demo_events('linux'), demo=True)
+        self.profiles.put('remote', dict(kind='openai', base_url='https://api.deepseek.com', model='test'), 'session-secret')
+        with patch('builtins.input', side_effect=['first', '', 's', 'second', '0', 'third', '', 'n', '0']), \
+                patch('guard_cli.ask', return_value='answer') as ask, redirect_stdout(io.StringIO()):
+            guard_cli.chat(store, self.profiles, task['id'])
+            guard_cli.chat(store, self.profiles, task['id'])
+        self.assertEqual(ask.call_count, 2)
+
+    def test_diagnostic_command_does_not_send_model_request(self):
+        store = guard.TaskStore(Path(self.temp.name) / 'tasks.db')
+        task = guard.run_task(store, 'demo:linux', lambda: guard.demo_events('linux'), demo=True)
+        task['last_model_diagnostic'] = {'code': 'output_limit', 'finish_reason': 'length'}
+        store.save(task)
+        self.profiles.put('local', dict(kind='ollama', base_url='http://localhost:11434', model='test'))
+        with patch('builtins.input', side_effect=['/status', '0']), \
+                patch('guard_cli.ask') as ask, redirect_stdout(io.StringIO()) as output:
+            guard_cli.chat(store, self.profiles, task['id'])
+        ask.assert_not_called()
+        self.assertIn('length', output.getvalue())
+
     def test_ctrl_c_during_model_discovery_returns_without_saving(self):
         with patch('builtins.input', side_effect=['1', '', '']), \
                 patch('guard_cli.discover', side_effect=KeyboardInterrupt), redirect_stdout(io.StringIO()):

@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 
 from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task
-from guard_models import Profiles, ask, context, discover, is_loopback, validate
+from guard_models import Profiles, ask, context, deepseek, discover, is_loopback, validate
 from terminal_ui import Cancelled, cancellable, choice, field, read_line
 
 STATES = {'completed_simulation': '模拟分析完成', 'collecting': '采集中', 'analyzing': '分析中',
@@ -49,6 +49,7 @@ def show(task):
         _note('模型解释（需核实）', task['model_answer'])
     if task.get('model_error'):
         _note('模型失败', task['model_error'])
+    show_diagnostic(task)
     for action in task['actions']:
         _note('模拟方案', f"{action['platform']} / {action['target']} / IP {action['ip']} / {action['ttl_seconds']} 秒")
         _note('处置状态', f"{STATES.get(action['status'], action['status'])}；{action['reason']}")
@@ -63,6 +64,48 @@ def show(task):
 
 
 @cancellable
+def model_parameters(profiles):
+    from cli import _heading, _note
+    name, current = profiles.active()
+    profile = dict(current)
+    _heading('模型参数', '0 取消 · 修改后用于下一次请求 · 提高额度可能增加耗时与费用')
+    if deepseek(profile):
+        selection = choice('1 普通回答（关闭思考）  2 深度思考', ('1', '2'),
+                           '2' if profile['thinking'] == 'enabled' else '1')
+        profile['thinking'] = 'enabled' if selection == '2' else 'disabled'
+    def integer(name):
+        def check(value):
+            try:
+                number = int(value)
+            except ValueError:
+                raise ValueError('请填写整数') from None
+            return validate({**profile, name: number})[name]
+        return check
+    default_tokens = current['max_tokens']
+    if profile['thinking'] == 'enabled' and current['thinking'] != 'enabled':
+        default_tokens = max(default_tokens, 16384)
+    profile['max_tokens'] = field('输出额度 tokens（256–65536）', str(default_tokens), validate=integer('max_tokens'))
+    profile['timeout_seconds'] = field('连接后读取等待上限，秒（10–600）', str(current['timeout_seconds']), validate=integer('timeout_seconds'))
+    _note('待保存', f"{name} / 思考 {profile['thinking']} / 输出额度 {profile['max_tokens']} / 等待 {profile['timeout_seconds']} 秒")
+    choice('1 保存参数  0 取消', ('1',), '1')
+    profiles.put(name, profile, profiles.session_keys.get(name, ''))
+    _note('参数已保存', '下一次提问生效；未发送模型请求')
+
+
+def show_diagnostic(task):
+    from cli import _note
+    diagnostic = task.get('last_model_diagnostic') or task.get('model_diagnostic')
+    if not diagnostic:
+        return
+    labels = {'code': '错误类别', 'http_status': 'HTTP 状态', 'finish_reason': '结束原因',
+              'has_reasoning': '包含思考内容', 'answer_chars': '答案字符数', 'prompt_tokens': '输入 tokens',
+              'completion_tokens': '输出 tokens', 'reasoning_tokens': '思考 tokens', 'total_tokens': '总 tokens'}
+    for name, label in labels.items():
+        if name in diagnostic:
+            _note(label, diagnostic[name])
+
+
+@cancellable
 def configure(profiles):
     from cli import _heading, _note
     _heading('模型配置', '回车采用默认值 · 任意一步输入 0 或 Ctrl+C 返回 · 密钥不会写入配置文件')
@@ -71,7 +114,11 @@ def configure(profiles):
     for index, name in enumerate(names, 1):
         profile = data['profiles'][name]
         _note(str(index), f"{name} / {profile['model']}" + ('（使用中）' if name == data['active'] else ''))
-    if names and choice('1 添加配置  2 切换已有配置  0 返回', ('1', '2'), '1') == '2':
+    operation = choice('1 添加配置  2 切换已有配置  3 调整当前模型参数  0 返回', ('1', '2', '3'), '1') if names else '1'
+    if operation == '3':
+        model_parameters(profiles)
+        return
+    if operation == '2':
         selected = choice('选择配置序号', tuple(str(i) for i in range(1, len(names) + 1)))
         name = names[int(selected) - 1]
         profiles.activate(name)
@@ -127,6 +174,8 @@ def configure(profiles):
     name = field('显示名称（不是服务地址）', default_name, validate=check_name)
     _note('服务', f"{kind} / {base}")
     _note('模型', profile['model'])
+    settings = validate(profile)
+    _note('回答设置', f"输出上限 {settings['max_tokens']} tokens；" + ('DeepSeek 思考关闭，可在参数菜单开启' if deepseek(profile) else '使用服务默认思考行为'))
     _note('密钥', f"环境变量 {profile['key_env']}" if profile['key_env'] else '本次会话已输入' if key else '未设置')
     if name in data['profiles']:
         _note('已有同名配置', f'保存将替换 {name}，输入 0 取消可保留原配置')
@@ -137,7 +186,7 @@ def configure(profiles):
         _note('密钥', '本次进程退出后清除；下次可重新输入，或设置所选环境变量')
 
 
-def consent_for(profiles, task=None):
+def consent_for(profiles, task=None, session=False):
     from cli import _note
     _, profile = profiles.active()
     if is_loopback(profile):
@@ -149,6 +198,9 @@ def consent_for(profiles, task=None):
         _note('本次证据条数', len(preview['evidence']))
         if read_line('  先查看发送的证据 JSON？输入 y 查看：').lower() == 'y':
             _note('发送证据预览', json.dumps(preview, ensure_ascii=False))
+    if session:
+        answer = read_line('  发送授权：y 仅本次，s 本任务本次对话（含后续问题），其他取消：').lower()
+        return 'session' if answer == 's' else answer == 'y'
     return read_line('  允许本次提问发送到此地址？输入 y 确认：').lower() == 'y'
 
 
@@ -166,7 +218,10 @@ def prepare_key(profiles):
 def chat(store, profiles, task_id):
     from cli import _heading, _note
     task = store.get(task_id)
-    _heading('围绕当前任务追问', '输入 0 或 /back 返回；回答不会改写规则结论或执行命令')
+    _heading('围绕当前任务追问', '0 或 /back 返回 · /status 查看本地模型诊断，不发送请求')
+    if not task.get('events'):
+        _note('没有可用登录证据', '可咨询排查方法，但无法判断本机是否被入侵；可重新采集更长时间的日志')
+    show_diagnostic(task)
     try:
         prepare_key(profiles)
     except ValueError as exc:
@@ -174,18 +229,30 @@ def chat(store, profiles, task_id):
         return
     for item in store.history(task_id, 4):
         _note('你' if item['role'] == 'user' else '模型', item['content'])
+    session_destination = None
     while True:
         question = read_line('  你 > ')
         if question in ('0', '/back', '退出', ''):
             return
+        if question == '/status':
+            show_diagnostic(store.get(task_id))
+            continue
         try:
-            if not consent_for(profiles, task):
-                _note('已取消', '未发送请求')
-                continue
+            current = profiles.active()
+            destination = json.dumps(current, sort_keys=True)
+            if session_destination != destination:
+                consent = consent_for(profiles, store.get(task_id), session=True)
+                if not consent:
+                    _note('已取消', '未发送请求')
+                    continue
+                if consent == 'session':
+                    session_destination = destination
             _note('正在分析', '等待模型回答…')
             _note('模型', ask(store, profiles, task_id, question, consent=True))
         except (ValueError, RuntimeError, OSError) as exc:
             _note('本次提问失败', exc)
+            task = store.get(task_id)
+            show_diagnostic(task)
             _note('继续操作', '可重新提问，或输入 0 返回；任务证据仍在本机')
 
 
@@ -253,6 +320,17 @@ def wizard(store, profiles):
     if source_choice == '1':
         source = f'{system}-local'
         collector, demo = (collect_windows if system == 'windows' else collect_linux), False
+        if system == 'linux':
+            def check_minutes(value):
+                try:
+                    minutes = int(value)
+                except ValueError:
+                    raise ValueError('请填写 1–1440 的整数') from None
+                if not 1 <= minutes <= 1440:
+                    raise ValueError('时间范围应为 1–1440 分钟')
+                return minutes
+            minutes = field('读取最近多少分钟的 SSH 日志', '15', validate=check_minutes)
+            collector = lambda: collect_linux(minutes=minutes)
     elif source_choice == '2':
         def check_directory(value):
             directory = Path(value.strip('"').strip("'")).expanduser().resolve()
