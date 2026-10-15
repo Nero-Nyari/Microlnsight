@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 import time
 
-from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task, task_assessment
+from guard import TaskStore, collect_export, collect_linux, collect_windows, demo_events, run_task, task_assessment, task_scope
 from guard_models import Profiles, ask, context, deepseek, discover, is_loopback, validate
 from terminal_ui import Cancelled, busy, cancellable, choice, field, model_answer, read_line, section, status_line
 
@@ -30,8 +30,7 @@ def show(task):
         _note('失败原因', task['error'])
     coverage = task.get('coverage', {})
     if coverage:
-        _note('数据范围', f"输入 {coverage['input']}，有效登录记录 {coverage['retained']}，"
-              f"排除/不支持 {coverage['excluded']}，重复 {coverage['duplicates']}，冲突 {coverage['conflicts']}")
+        _note('数据范围', task_scope(task)['summary'])
         _note('日志时间 UTC', f"{task['time_range']['start']} → {task['time_range']['end']}")
     section('处理阶段')
     for stage in task['stages']:
@@ -46,15 +45,35 @@ def show(task):
     assessment = task_assessment(task)
     _note('规则结果', assessment['label'])
     if assessment['scope_incomplete']:
-        _note('分析范围不完整', '存在未识别、排除、冲突或未读取内容；这些内容尚无法判断')
+        section('分析覆盖明细（分析范围不完整）')
+        for reason in task_scope(task)['reasons']:
+            _note(reason['label'], reason['detail'])
     if not coverage:
         _note('范围说明', '没有可核实的分析范围信息，请重新采集分析')
     _note('判断范围', '仅限已分析日志及当前规则，不能据此确认整机安全')
+    analysis = task.get('security_analysis', {})
+    if analysis.get('event_types'):
+        section('Windows Security 活动分析')
+        for item in analysis['event_types']:
+            _note(f"{item['event_id']} · {item['label']} · {item['count']} 条", item['meaning'])
+            if item['return_codes']:
+                labels = {'success': '返回成功', 'nonzero': '非零返回码', 'unknown': '返回码未知'}
+                _note('操作结果', '，'.join(f'{labels[k]} {v} 条' for k, v in item['return_codes'].items()))
+            if item.get('related_logons'):
+                _note('会话关联', f"{item['related_logons']} 条关联到同主机、同账户的登录会话")
+            _note('证据示例', ', '.join(item['refs']))
+            if item['event_id'] == '4672' and analysis.get('privilege_context'):
+                _note('特权判读', f"{analysis['privilege_context']['standalone_observations']} 条仅作为活动记录；特权分配本身不触发异常提示，账户是否获授权仍需业务背景确认")
     if task['findings']:
         section(f"异常线索 · {len(task['findings'])} 条")
     for finding in task['findings']:
         _note('线索', finding['title'])
-        _note('依据', f"{finding['host']} / {finding['account']} / {finding['ip']}，5 分钟内 {finding['failure_count']} 次失败")
+        if finding.get('category') == 'windows_security':
+            _note('依据', f"{finding['host']} / {finding.get('account') or '账户未知'}，{finding['count']} 条事件；{finding['explanation']}")
+            for step in finding['next_steps']:
+                _note('核查建议', step)
+        else:
+            _note('依据', f"{finding['host']} / {finding['account']} / {finding['ip']}，5 分钟内 {finding['failure_count']} 次失败")
         _note('证据', ', '.join(finding['refs'][:12]) + (' …' if len(finding['refs']) > 12 else ''))
     if task.get('model_answer'):
         model_answer(task['model_answer'])
@@ -239,7 +258,7 @@ def chat(store, profiles, task_id):
     task = store.get(task_id)
     _heading('围绕当前任务追问', '0 或 /back 返回 · /status 查看本地模型诊断，不发送请求')
     if not task.get('events'):
-        _note('没有可用登录证据', '可咨询排查方法，但无法判断本机是否被入侵；可重新采集更长时间的日志')
+        _note('没有可用事件证据', '可咨询排查方法，但无法判断本机是否被入侵；可重新采集更长时间的日志')
     show_diagnostic(task)
     try:
         prepare_key(profiles)
@@ -305,7 +324,7 @@ def task_detail(store, profiles, task):
                     return output
                 output = field('导出文件路径（包含 .json 文件名）', validate=export_path)
                 with output.open('x', encoding='utf-8') as stream:
-                    json.dump(dict(task=task, conversation=store.history(task_id, 1000)), stream, ensure_ascii=False, indent=2)
+                    json.dump(dict(task=task, analysis_scope=task_scope(task), conversation=store.history(task_id, 1000)), stream, ensure_ascii=False, indent=2)
                 _note('已导出', output)
             except Cancelled:
                 _note('已取消', '返回任务详情')
@@ -330,7 +349,7 @@ def task_menu(store, profiles):
 
 
 @cancellable
-def wizard(store, profiles):
+def wizard(store, profiles, *, on_task=None):
     import platform
     from cli import _heading, _note
     from guard import plan
@@ -385,7 +404,8 @@ def wizard(store, profiles):
     def collect_with_status():
         with busy('读取日志'):
             return collector()
-    task = run_task(store, source, collect_with_status, protected=protected, demo=demo, analyst=analyst)
+    task = run_task(store, source, collect_with_status, protected=protected, demo=demo, analyst=analyst,
+                    on_task=on_task)
     task_detail(store, profiles, task)
 
 

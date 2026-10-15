@@ -35,6 +35,12 @@ jobs:
       - name: Check full-screen terminal flows
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_tui.py -v
+      - name: Check analysis coverage explanations
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_scope_details.py -v
+      - name: Windows Security analysis contracts
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_windows_security.py -v
 
   backend:
     runs-on: windows-latest

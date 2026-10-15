@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from contextlib import redirect_stdout
 from datetime import datetime
 import os
@@ -22,6 +23,8 @@ from prompt_toolkit.layout import (
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.margins import Margin
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
@@ -29,7 +32,7 @@ from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.utils import get_cwidth
 
 import guard_cli
-from guard import demo_events, run_task, task_assessment
+from guard import demo_events, run_task, task_assessment, task_scope
 from terminal_ui import Cancelled, input_handler, model_answer, output_width
 
 
@@ -103,8 +106,11 @@ def task_result(task):
         'pending': '采集中', 'findings': f"待核查线索 {len(task.get('findings', []))} 条",
         'insufficient_data': '数据不足', 'no_findings': '已分析范围内无线索',
     }[assessment['status']]
-    if assessment['scope_incomplete']:
-        label += ' · 范围不完整'
+    reasons = task_scope(task)['reasons']
+    if reasons:
+        label += ' · ' + reasons[0]['label']
+        if len(reasons) > 1:
+            label += f'（另 {len(reasons) - 1} 项，见详情）'
     return label
 
 
@@ -153,6 +159,93 @@ class WorkerOutput:
         return getattr(self.original, name)
 
 
+class OutputScrollbar(Margin):
+    """A scrollbar measured in wrapped screen rows, including long paragraphs."""
+    def get_width(self, get_ui_content):
+        return 1
+
+    def create_margin(self, info, width, height):
+        window = info.window
+        size = max(1, height * height // max(height, window.total_rows))
+        start = round(window.top_row * (height - size) / max(1, window.max_top))
+        return [('class:scrollbar.' + ('button' if start <= row < start + size else 'background'), ' \n')
+                for row in range(height)]
+
+
+class OutputWindow(Window):
+    """Scroll output independently of the input cursor; preserve a reading anchor."""
+    def __init__(self, control):
+        super().__init__(content=control, wrap_lines=True, style='class:surface',
+                         right_margins=[OutputScrollbar()], always_hide_cursor=True)
+        self.follow_tail = True
+        self.top_row = self.max_top = 0
+        self.total_rows = 1
+        self.row_offsets = [0, 1]
+        self.dragging = False
+        self._height_key = None
+
+    def _scroll(self, ui_content, width, height):
+        if width <= 0 or height <= 0:
+            return
+        key = (self.content.buffer.text, width)
+        if key != self._height_key:
+            offsets = [0]
+            for line in range(ui_content.line_count):
+                offsets.append(offsets[-1] + ui_content.get_height_for_line(line, width, self.get_line_prefix))
+            self.row_offsets = offsets
+            self._height_key = key
+        self.total_rows = self.row_offsets[-1]
+        self.max_top = max(0, self.total_rows - height)
+        anchor = self.row_offsets[min(self.vertical_scroll, len(self.row_offsets) - 2)] + self.vertical_scroll_2
+        self._set_top(self.max_top if self.follow_tail else anchor)
+
+    def _set_top(self, row):
+        self.top_row = max(0, min(self.max_top, int(row)))
+        self.vertical_scroll = max(0, bisect_right(self.row_offsets, self.top_row) - 1)
+        self.vertical_scroll_2 = self.top_row - self.row_offsets[self.vertical_scroll]
+        self.horizontal_scroll = 0
+
+    def scroll_rows(self, rows):
+        self._set_top(self.top_row + rows)
+        self.follow_tail = self.top_row == self.max_top
+
+    def page(self, direction):
+        if self.render_info:
+            self.scroll_rows(direction * max(1, self.render_info.window_height - 1))
+
+    def _scroll_up(self):
+        self.scroll_rows(-3)
+
+    def _scroll_down(self):
+        self.scroll_rows(3)
+
+    def _write_to_screen_at_index(self, screen, mouse_handlers, write_position, parent_style, erase_bg):
+        super()._write_to_screen_at_index(screen, mouse_handlers, write_position, parent_style, erase_bg)
+        if write_position.width <= 0 or write_position.height <= 0:
+            return
+        x = write_position.xpos + write_position.width - 1
+
+        def scrollbar_mouse(event):
+            if event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+                return self._mouse_handler(event)
+            if event.button != MouseButton.LEFT:
+                self.dragging = False
+                return NotImplemented
+            if event.event_type == MouseEventType.MOUSE_DOWN:
+                self.dragging = True
+            if self.dragging:
+                row = event.position.y - write_position.ypos
+                self._set_top(round(row * self.max_top / max(1, write_position.height - 1)))
+                self.follow_tail = self.top_row == self.max_top
+            if event.event_type == MouseEventType.MOUSE_UP:
+                self.dragging = False
+            return None
+
+        mouse_handlers.set_mouse_handler_for_range(
+            x_min=x, x_max=x + 1, y_min=write_position.ypos,
+            y_max=write_position.ypos + write_position.height, handler=scrollbar_mouse)
+
+
 class Workbench:
     def __init__(self, store, profiles, system, data_dir, *, input=None, output=None):
         self.store, self.profiles, self.system = store, profiles, system
@@ -167,6 +260,7 @@ class Workbench:
         self.response_ready = threading.Event()
         self.cancel_requested = threading.Event()
         self.exit_after = False
+        self.next_command = None
         self.sidebar = True
         self.loop = None
         self.model = '规则分析 · 未配置模型'
@@ -177,6 +271,7 @@ class Workbench:
 
         self.messages = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
                                  style='class:surface', lexer=MessageLexer())
+        self.messages.window = OutputWindow(self.messages.control)
         self.editor = TextArea(
             height=Dimension(min=1, preferred=2, max=2), multiline=True,
             prompt=' › ', style='class:input',
@@ -226,7 +321,7 @@ class Workbench:
         @keys.add('c-l')
         def clear(event):
             if not self.running:
-                self.messages.text = ''
+                self.clear_output()
 
         @keys.add('f1')
         def help_(event):
@@ -234,11 +329,11 @@ class Workbench:
 
         @keys.add('pageup')
         def page_up(event):
-            self.messages.buffer.cursor_up(count=max(1, self.app.output.get_size().rows - 10))
+            self.messages.window.page(-1)
 
         @keys.add('pagedown')
         def page_down(event):
-            self.messages.buffer.cursor_down(count=max(1, self.app.output.get_size().rows - 10))
+            self.messages.window.page(1)
 
         self.app = Application(
             layout=Layout(FloatContainer(root, [Float(xcursor=True, ycursor=True, content=ConditionalContainer(
@@ -258,6 +353,25 @@ class Workbench:
             self.model = safe_text(data['active'] + ' / ' + data['profiles'][data['active']]['model'])
         self.recent = self.store.recent(5)
         self.selected_task = self.store.get(self.task_id) if self.task_id else None
+
+    def select_task(self, task_id):
+        self.task_id = task_id
+        self.refresh_context()
+        self.app.invalidate()
+
+    def collection_status(self):
+        task = self.selected_task
+        if not task:
+            return '日志权限将在采集时检查'
+        if task.get('demo') or str(task.get('source', '')).startswith('demo:'):
+            return '合成演示 · 未检查本机日志权限'
+        if task.get('source') not in ('windows-local', 'linux-local'):
+            return '导入任务 · 未检查本机日志权限'
+        if any(s.get('stage') == 'collect' and s.get('status') == 'complete' for s in task.get('stages', [])):
+            return '当前任务已完成本机日志读取'
+        if task.get('status') in ('failed', 'interrupted'):
+            return '当前任务采集未完成 · 见详情'
+        return '当前任务正在读取本机日志'
 
     def show_sidebar(self):
         size = self.app.output.get_size()
@@ -318,7 +432,7 @@ class Workbench:
         line()
         line('工作区', 'class:title')
         line(self.system.title() + ' · 本机分析')
-        line('日志权限将在采集时检查', 'class:muted')
+        line(self.collection_status(), 'class:muted')
         line()
         line('当前模型', 'class:muted')
         # Split profile and model instead of wrapping a long identifier arbitrarily.
@@ -331,8 +445,11 @@ class Workbench:
         if task:
             line(task_source(task) + ' · ' + task_time(task))
             line(task_result(task).split(' · ')[0], 'class:warning')
-            if task_assessment(task)['scope_incomplete']:
-                line('分析范围不完整', 'class:warning')
+            reasons = task_scope(task)['reasons']
+            for reason in reasons[:2]:
+                line(reason['label'], 'class:warning')
+            if len(reasons) > 2:
+                line(f'另 {len(reasons) - 2} 项，见详情', 'class:muted')
             line('/details 证据与导出', 'class:accent')
         else:
             line('尚未选择任务', 'class:muted')
@@ -345,8 +462,10 @@ class Workbench:
 
     def status(self):
         if self.running:
+            if self.pending:
+                return '  ● 等待输入 · Enter 确认，Ctrl+C 取消'
             elapsed = int(time.monotonic() - self.started)
-            label = '等待输入' if self.pending else '处理中'
+            label = '处理中'
             return f'  {"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 5) % 10]} {label} · {elapsed} 秒' + (' · 完成当前操作后退出' if self.exit_after else '')
         label = '任务已选择' if self.task_id else '等待开始'
         return '  ' + fit_line(f'● {label}   ·   {self.model}', self.app.output.get_size().columns - 2)
@@ -372,9 +491,25 @@ class Workbench:
     def append(self, value):
         if re.fullmatch('─+', value):
             return  # The full-screen layout already separates sections.
-        text = (self.messages.text + safe_text(value))[-160000:]
-        self.messages.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+        previous = self.messages.text
+        combined = previous + safe_text(value)
+        removed = max(0, len(combined) - 160000)
+        text = combined[removed:]
+        window = self.messages.window
+        position = len(text) if window.follow_tail else max(0, self.messages.buffer.cursor_position - removed)
+        if removed and not window.follow_tail:
+            anchor = self.messages.buffer.document.translate_row_col_to_index(window.vertical_scroll, 0)
+            new_document = Document(text)
+            window.vertical_scroll = new_document.translate_index_to_position(max(0, anchor - removed))[0]
+            if anchor < removed:
+                window.vertical_scroll_2 = 0
+        self.messages.buffer.set_document(Document(text, position), bypass_readonly=True)
         self.app.invalidate()
+
+    def clear_output(self):
+        self.messages.text = ''
+        self.messages.window.follow_tail = True
+        self.messages.window._set_top(0)
 
     def help(self):
         self.append('\n命令面板\n' + '\n'.join(f'  {key:<15} {value}' for key, value in COMMANDS.items()) + '\n\n')
@@ -415,17 +550,23 @@ class Workbench:
             self.response_ready.set()
             return
         self.prompt, self.secret, self.pending = safe_text(prompt.strip()), secret, True
+        self.refresh_context()
         self.editor.text = ''
         self.app.invalidate()
 
     def submit(self):
         value = self.editor.text.strip()
         if self.pending:
+            if not self.secret and value in COMMANDS:
+                self.next_command = value
+                self.cancel()
+                return
             if not self.secret:
                 self.append(f'\n  {self.prompt}\n  › {value or "（默认）"}\n')
             self.response = value
             self.editor.text = ''
             self.pending = self.secret = False
+            self.started = time.monotonic()
             self.response_ready.set()
             return
         if self.running or not value:
@@ -435,11 +576,11 @@ class Workbench:
         if command == '/exit':
             self.request_exit()
         elif command in ('/clear', '/home'):
-            self.messages.text = ''
+            self.clear_output()
         elif command == '/workspace':
             self.append(f'\n工作区详情\n  平台：{self.system.title()}\n  模型：{self.model}\n'
                         f'  数据目录：{self.data_dir}\n  当前任务：{self.task_id or "尚未选择"}\n'
-                        '  日志权限：采集时检查\n  防护建议尚未执行\n\n')
+                        f'  采集状态：{self.collection_status()}\n  防护建议尚未执行\n\n')
         elif command == '/sidebar':
             self.sidebar = not self.sidebar
         elif command == '/help':
@@ -462,6 +603,10 @@ class Workbench:
             self.app.invalidate()
             if self.exit_after:
                 self.app.exit()
+            elif self.next_command:
+                command, self.next_command = self.next_command, None
+                self.editor.text = command
+                self.submit()
 
     def worker(self, command):
         token = input_handler.set(self.read_input)
@@ -484,10 +629,8 @@ class Workbench:
             self.task_id = task['id']
             guard_cli.show(task)
         elif command == '/scan':
-            guard_cli.wizard(self.store, self.profiles)
-            latest = self.store.recent(1)
-            if latest:
-                self.task_id = latest[0]['id']
+            guard_cli.wizard(self.store, self.profiles,
+                             on_task=lambda task: self.loop.call_soon_threadsafe(self.select_task, task['id']))
         elif command == '/models':
             guard_cli.configure(self.profiles)
         elif command == '/parameters':

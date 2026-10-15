@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+import windows_security as security
 
 ROOT = Path(__file__).resolve().parent
 MAX_BYTES = 16 * 1024 * 1024
@@ -120,15 +121,17 @@ class TaskStore:
         return [dict(role=role, content=content) for role, content in reversed(rows)]
 
 
-def linux_events(text):
+def linux_events(text, rejected_reasons=None):
     from server_logs import parse_ssh_line
     events, rejected = [], 0
     for number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
-        event, _ = parse_ssh_line(line)
+        event, reason = parse_ssh_line(line)
         if event is None:
             rejected += 1
+            if rejected_reasons is not None:
+                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
             continue
         events.append(dict(platform='linux', host=event['host'], account=event['account'], ip=event['ip'],
                            kind=event['kind'], time=event['time'].isoformat(),
@@ -137,12 +140,81 @@ def linux_events(text):
     return events, rejected
 
 
+def task_scope(task):
+    """One read-only explanation for UI, reports and model context, including old tasks."""
+    coverage = task.get('coverage') or {}
+    collection = coverage.get('collection') or {}
+    reasons = []
+
+    def add(code, label, detail, count=None):
+        reasons.append(dict(code=code, label=label, detail=detail, count=count))
+
+    collected = any(s.get('stage') == 'collect' and s.get('status') == 'complete'
+                    for s in task.get('stages', []))
+    if task.get('status') in ('failed', 'interrupted') and not collected:
+        add('collection_failed', '采集未完成', '采集失败或中断；具体原因见失败信息，不能仅据此判断为权限不足。')
+    if not coverage:
+        add('coverage_unknown', '范围统计缺失', '此任务未保存可核实的范围统计，需重新采集。')
+        return dict(summary='没有可核实的分析范围统计', reasons=reasons, incomplete=True)
+
+    # Older tasks only kept the fixed limit warning and an aggregate rejected count.
+    limit_reached = collection.get('limit_reached') or any(
+        str(w).startswith('达到采集上限；') for w in task.get('warnings', []))
+    if limit_reached:
+        add('collection_limit', '达到采集上限', '更早记录可能未读取；未读数量未知。')
+    if collection.get('warning'):
+        add('collection_warning', '采集返回警告', '请查看范围说明中的采集原始提示；警告不一定涉及权限。')
+    diagnostics = coverage.get('windows_diagnostics') or {}
+    remaining = coverage.get('excluded', 0)
+    labels = {
+        'unsupported': ('消息暂不支持', '已读取，但当前解析规则不支持这类消息；不代表没有安全价值。'),
+        'missing_metadata': ('必要字段缺失或无效', '账户、主机、IP、时间或记录标识不符合关联要求。'),
+        'unknown_source': ('来源无法确认', '无法确认记录来自支持的日志通道或 SSH 进程。'),
+        'invalid': ('日志格式无效', '无法按当前日志格式解析。'),
+    }
+    for code, (label, detail) in labels.items():
+        count = min(remaining, (coverage.get('excluded_reasons') or {}).get(code, 0))
+        if count:
+            if code == 'unsupported' and diagnostics.get('unsupported_event_ids'):
+                detail += ' 事件 ID：' + '，'.join(f'{eid}：{n} 条' for eid, n in sorted(diagnostics['unsupported_event_ids'].items())) + '。'
+            if code == 'missing_metadata' and diagnostics.get('missing_fields'):
+                names = {'record_id': '记录编号', 'timestamp': '时间', 'computer': '主机', 'username': '目标账户'}
+                detail = '具体字段：' + '，'.join(f'{names.get(k, k)} {n} 条' for k, n in sorted(diagnostics['missing_fields'].items())) + '；同一记录可缺少多个字段。'
+            add(code, f'{label} {count} 条', detail, count)
+            remaining -= count
+    if remaining:
+        add('excluded_unknown', f'排除原因未细分 {remaining} 条',
+            '此任务只保存了排除总数，无法还原具体类别；重新采集可记录分类。', remaining)
+    if coverage.get('conflicts'):
+        count = coverage['conflicts']
+        add('conflicting_records', f'记录冲突 {count} 条', '相同记录标识对应不同内容，未参与关联分析。', count)
+    if coverage.get('retained_without_ip'):
+        count = coverage['retained_without_ip']
+        add('source_ip_unavailable', f'已保留但无可用来源 IP {count} 条',
+            '登录记录已保留为证据；来源 IP 未提供或无效，不参与按来源 IP 关联的重复失败规则，也不生成封禁建议。服务登录等事件可以不记录来源 IP，不代表整条日志无效。', count)
+    for item in task.get('security_analysis', {}).get('event_types', []):
+        if item.get('missing_details'):
+            labels = {'actor_account': '操作账户', 'target_account': '目标账户或组', 'read_operation': '读取操作',
+                      'return_code': '返回码', 'subject_sid': '操作账户标识', 'privilege_list': '特权列表',
+                      'group_membership': '组成员列表', 'caller_process_name': '调用进程路径', 'operation': '操作类型'}
+            add('audit_details_missing', f"{item['event_id']} 审计细节不完整",
+                '事件已保留；部分判断所需字段缺失：' + '，'.join(f'{labels.get(k, k)} {v} 条' for k, v in item['missing_details'].items()))
+    if (coverage.get('scope_incomplete') or task.get('scope_incomplete')) and not (
+            limit_reached or collection.get('warning')):
+        add('collection_unknown', '采集范围原因未细分', '保存的范围标记不完整，无法确认是否有未读取内容；不推断为权限问题。')
+    summary = (f"已读取 {coverage.get('input', 0)} 条，{coverage.get('retained', 0)} 条参与分析，"
+               f"{coverage.get('excluded', 0)} 条排除，{coverage.get('duplicates', 0)} 条重复合并，"
+               f"{coverage.get('conflicts', 0)} 条冲突")
+    if 'ip_rule_eligible' in coverage:
+        summary += f"；其中 {coverage['ip_rule_eligible']} 条可按来源 IP 关联"
+    return dict(summary=summary, reasons=reasons, incomplete=bool(reasons))
+
+
 def task_assessment(task):
     """Derive a current verdict, including failed and legacy tasks, without writes."""
     state = task.get('status')
     coverage = task.get('coverage') or {}
-    incomplete = bool(coverage.get('excluded') or coverage.get('conflicts')
-                      or task.get('scope_incomplete') or coverage.get('scope_incomplete'))
+    incomplete = task_scope(task)['incomplete']
     if state == 'failed':
         collected = any(s.get('stage') == 'collect' and s.get('status') == 'complete' for s in task.get('stages', []))
         status, label = 'failed', '分析失败，本次未完成分析' if collected else '采集失败，本次未完成分析'
@@ -154,6 +226,8 @@ def task_assessment(task):
         status, label = 'findings', '发现待核查线索'
     elif not coverage.get('retained'):
         status, label = 'insufficient_data', '数据不足，无法判断'
+    elif coverage.get('ip_rule_eligible') == 0 and not coverage.get('security_audit_retained'):
+        status, label = 'insufficient_data', '已保留登录证据，但无可用来源 IP，当前关联规则无法判断'
     else:
         status, label = 'no_findings', '在已分析范围内未发现规则线索'
     if not coverage:
@@ -161,21 +235,49 @@ def task_assessment(task):
     return dict(status=status, label=label, scope_incomplete=incomplete)
 
 
-def windows_events(rows):
+def windows_events(rows, rejected_reasons=None, diagnostics=None):
     sys.path.insert(0, str(ROOT / 'backend')) if str(ROOT / 'backend') not in sys.path else None
     from app.agents.event_context import extract_event_context
     events, rejected = [], 0
+    diagnostics = diagnostics if diagnostics is not None else {}
+    def count(group, key):
+        counts = diagnostics.setdefault(group, {})
+        counts[str(key)] = counts.get(str(key), 0) + 1
     for number, row in enumerate(rows, 1):
         raw = json.dumps(row, ensure_ascii=False)
         r = extract_event_context(raw)
         when, ip = stamp(r['timestamp']), address(r['source_ip'])
-        if (str(r['channel']).casefold() != 'security' or r['event_id'] not in ('4624', '4625')
-                or r['record_id'] is None or not (when and ip and r['computer'] and r['username'])):
+        count('event_ids', r['event_id'] or 'unknown')
+        missing = [name for name, valid in (
+            ('record_id', str(r['record_id']).isdigit() and int(r['record_id']) > 0),
+            ('timestamp', when), ('computer', r['computer']),
+            ('username', r['username'] or r['event_id'] not in ('4624', '4625'))) if not valid]
+        reason = ('unknown_source' if str(r['channel']).casefold() != 'security' else
+                  'unsupported' if r['event_id'] not in security.SPECS else
+                  'missing_metadata' if missing else None)
+        if reason:
+            if reason == 'unsupported':
+                count('unsupported_event_ids', r['event_id'] or 'unknown')
+            elif reason == 'missing_metadata':
+                for name in missing:
+                    count('missing_fields', name)
             rejected += 1
+            if rejected_reasons is not None:
+                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
             continue
+        logon_type = str(r.get('logon_type')) if r.get('logon_type') is not None else None
+        auth = r['event_id'] in ('4624', '4625')
+        details = security.fields(r)
+        if auth:
+            count('logon_types', logon_type or 'unknown')
+        else:
+            ip = None
+        ip_status = ('present' if ip else 'not_recorded' if r['source_ip'] is None else 'invalid') if auth else 'not_applicable'
+        count('source_ip_status', ip_status)
         events.append(dict(platform='windows', host=r['computer'],
-                           account='\\'.join(filter(None, [r['account_domain'], r['username']])),
-                           ip=ip, kind='failure' if r['event_id'] == '4625' else 'success',
+                           account=details['target_account'] if auth or r['event_id'] == '4627' else details['actor_account'],
+                           ip=ip, source_ip_status=ip_status, event_id=r['event_id'], logon_type=logon_type,
+                           kind=security.SPECS[r['event_id']][1], security=details,
                            time=when.isoformat(), identity=f"Security:{r['record_id']}:{when.isoformat()}",
                            ref=f"Security:{r['record_id']}", raw=raw[:4096],
                            raw_sha256=hashlib.sha256(raw.encode()).hexdigest(), raw_truncated=len(raw) > 4096))
@@ -209,12 +311,15 @@ def collect_linux(target=None, minutes=15, limit=1000):
     if len(result.stdout) > MAX_BYTES:
         raise ValueError('本轮日志超过 16 MiB，请缩小时间或条数范围')
     text = result.stdout.decode('utf-8', errors='replace')
-    events, rejected = linux_events(text)
+    rejected_reasons = {}
+    events, rejected = linux_events(text, rejected_reasons)
     warnings = [result.stderr.decode('utf-8', errors='replace').strip()] if result.stderr.strip() else []
     if len(text.splitlines()) >= limit:
         warnings.append('达到采集上限；更早记录可能未读取，未读数量未知')
     warnings.append(f'仅覆盖 SSH journal，最近 {minutes} 分钟；未采集应用和文件审计日志')
-    return dict(events=events, rejected=rejected, warnings=warnings,
+    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons, warnings=warnings,
+                collection=dict(limit=limit, minutes=minutes, limit_reached=len(text.splitlines()) >= limit,
+                                warning=bool(result.stderr.strip())),
                 scope_incomplete=bool(result.stderr.strip() or len(text.splitlines()) >= limit))
 
 
@@ -225,8 +330,9 @@ def collect_export(directory):
     if path.stat().st_size > MAX_BYTES:
         raise ValueError('SSH 导出超过 16 MiB，请缩小导出范围')
     data = path.read_bytes()
-    events, rejected = linux_events(data.decode('utf-8', errors='replace'))
-    return dict(events=events, rejected=rejected, source_sha256=hashlib.sha256(data).hexdigest(),
+    rejected_reasons = {}
+    events, rejected = linux_events(data.decode('utf-8', errors='replace'), rejected_reasons)
+    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons, source_sha256=hashlib.sha256(data).hexdigest(),
                 warnings=['历史导出仅用于复盘；防护建议不代表当前服务器状态'])
 
 
@@ -236,20 +342,32 @@ def collect_windows(limit=1000):
         raise ValueError('本机 Windows 采集需要在 Windows 上运行')
     sys.path.insert(0, str(ROOT / 'backend')) if str(ROOT / 'backend') not in sys.path else None
     from app.services.log_reader import read_windows_logs
-    result = read_windows_logs(channels=['Security'], max_events=limit, suspicious_only=False)
-    if result.get('is_mock') or result.get('read_status') == 'failed':
-        details = '; '.join(str(row.get('message') or row.get('status')) for row in result.get('channel_results', []))
-        raise RuntimeError('未取得真实 Security 日志；请在有读取权限的终端运行。' + details[:1000])
-    events, rejected = windows_events(result['events'])
-    warnings = ['仅覆盖本机最近的 Security 登录事件；未读事件不能据此判断安全']
-    for channel in result.get('channel_results', []):
-        if channel.get('status') != 'success':
-            warnings.append(str(channel.get('message') or channel.get('status')))
-        if channel.get('events_read', 0) >= limit:
-            warnings.append('达到采集上限；更早记录可能未读取，未读数量未知')
-    return dict(events=events, rejected=rejected, warnings=warnings,
-                scope_incomplete=any(c.get('status') != 'success' or c.get('events_read', 0) >= limit
-                                     for c in result.get('channel_results', [])))
+    rows, partitions = [], []
+    warnings = ['按类别限额查询本机 Security 4624/4625、5379、4672、4627、4798、4799、5058、5061；其他事件未采集，不能据此判断整机安全']
+    for ids, quota in security.query_plan(limit):
+        result = read_windows_logs(channels=['Security'], max_events=quota, suspicious_only=False, event_ids=ids)
+        if result.get('is_mock') or result.get('read_status') == 'failed':
+            details = '; '.join(str(row.get('message') or row.get('status')) for row in result.get('channel_results', []))
+            raise RuntimeError('未取得真实 Security 日志；请在有读取权限的终端运行。' + details[:1000])
+        rows.extend(result['events'])
+        warning = any(c.get('status') != 'success' for c in result.get('channel_results', []))
+        partitions.append(dict(event_ids=ids, limit=quota, read=len(result['events']),
+                               limit_reached=len(result['events']) >= quota, warning=warning))
+        warnings.extend(str(c.get('message') or c.get('status')) for c in result.get('channel_results', []) if c.get('status') != 'success')
+    reached = any(p['limit_reached'] for p in partitions)
+    warning = any(p['warning'] for p in partitions)
+    if reached:
+        warnings.append('达到采集上限；部分事件类别达到独立额度，更早记录可能未读取，未读数量未知')
+    omitted = [int(eid) for eid in security.SPECS if int(eid) not in {eid for p in partitions for eid in p['event_ids']}]
+    if omitted:
+        warnings.append('条数额度不足，未查询事件：' + ', '.join(map(str, omitted)))
+    rejected_reasons, diagnostics = {}, {}
+    events, rejected = windows_events(rows, rejected_reasons, diagnostics)
+    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons, warnings=warnings,
+                windows_diagnostics=diagnostics,
+                collection=dict(limit=limit, event_ids=[eid for p in partitions for eid in p['event_ids']], channel='Security',
+                                partitions=partitions, omitted_event_ids=omitted, limit_reached=reached, warning=warning),
+                scope_incomplete=bool(reached or warning or omitted))
 
 
 def demo_events(platform):
@@ -277,7 +395,7 @@ def detect(collection):
     rows.sort(key=lambda r: r['time'])
     groups = defaultdict(list)
     for event in rows:
-        if event['kind'] == 'failure':
+        if event['kind'] == 'failure' and address(event.get('ip')):
             groups[(event['platform'], event['host'], event['account'], event['ip'])].append(event)
     findings = []
     for (platform, host, account, ip), failures in groups.items():
@@ -302,6 +420,16 @@ def detect(collection):
                 retained=len(rows), excluded=collection.get('rejected', 0), duplicates=duplicates, conflicts=conflicts),
                 time_range=dict(start=rows[0]['time'] if rows else None, end=rows[-1]['time'] if rows else None))
     result['coverage']['scope_incomplete'] = bool(collection.get('scope_incomplete'))
+    result['coverage']['excluded_reasons'] = dict(collection.get('rejected_reasons', {}))
+    result['coverage']['collection'] = dict(collection.get('collection', {}))
+    if 'windows_diagnostics' in collection or any(r['platform'] == 'windows' for r in rows):
+        result['coverage']['windows_diagnostics'] = dict(collection.get('windows_diagnostics', {}))
+        auth_rows = [r for r in rows if r['kind'] in ('success', 'failure')]
+        result['coverage']['ip_rule_eligible'] = sum(bool(address(r.get('ip'))) for r in auth_rows)
+        result['coverage']['retained_without_ip'] = len(auth_rows) - result['coverage']['ip_rule_eligible']
+        result['coverage']['security_audit_retained'] = sum(r.get('event_id') in {str(e) for e in security.AUDIT_IDS} for r in rows)
+        result['security_analysis'], audit_findings = security.review(rows, findings)
+        result['findings'].extend(audit_findings)
     result['assessment'] = task_assessment(result)
     return result
 
@@ -312,6 +440,8 @@ def plan(findings, protected=(), ttl=600, demo=False, source=''):
     networks = [ipaddress.ip_network(item, strict=False) for item in protected]
     actions = []
     for finding in findings:
+        if finding.get('rule') not in ('auth_repeated_failure', 'auth_failure_then_success') or not address(finding.get('ip')):
+            continue
         ip = ipaddress.ip_address(finding['ip'])
         blocked = (ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local
                    or any(ip in network for network in networks))
@@ -364,15 +494,17 @@ def simulate(actions):
         # This verifies only the adapter's memory state, never a host firewall.
 
 
-def run_task(store, source, collector, protected=(), ttl=600, demo=False, analyst=None):
+def run_task(store, source, collector, protected=(), ttl=600, demo=False, analyst=None, *, on_task=None):
     task = store.create(source, demo)
     try:
+        if on_task:
+            on_task(task)
         collection = collector()
         task.update(detect(collection))
         task['warnings'] = collection.get('warnings', [])
         task['source_sha256'] = collection.get('source_sha256')
         if not task['events']:
-            task['warnings'].append('没有符合关联条件的登录记录；需核对权限、时间范围和日志格式')
+            task['warnings'].append('没有符合当前解析条件的记录；请查看分析覆盖明细，核对时间范围和消息类型')
         task['stages'].append(dict(stage='collect', status='complete', at=utcnow().isoformat()))
         task['stages'].append(dict(stage='rules', status='complete', at=utcnow().isoformat()))
         task['status'] = 'analyzing'

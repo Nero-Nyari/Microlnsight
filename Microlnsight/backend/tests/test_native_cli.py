@@ -22,6 +22,16 @@ import install_cli
 
 
 class NativeCliTests(unittest.TestCase):
+    def setUp(self):
+        # Entry-point tests must not acquire the running user's installation lock.
+        temp = tempfile.TemporaryDirectory(dir=ROOT / 'backend/data')
+        self.addCleanup(temp.cleanup)
+        self.install_root = Path(temp.name)
+        for target in ('agent.ROOT', 'install_cli.ROOT'):
+            patcher = patch(target, self.install_root)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_both_native_platforms_route_scan_without_ssh(self):
         for system in ('Windows', 'Linux'):
             with self.subTest(system=system), tempfile.TemporaryDirectory(dir=ROOT / 'backend/data') as directory:
@@ -52,9 +62,9 @@ class NativeCliTests(unittest.TestCase):
                     patch('install_cli.atomic'), \
                     patch('install_cli.subprocess.run') as run, redirect_stdout(io.StringIO()):
                 install_cli.main()
-                builder.return_value.create.assert_called_once_with(ROOT / '.venv-cli')
-                self.assertEqual(run.call_args.args[0], [str(ROOT / '.venv-cli' / executable), '-m', 'pip', 'install',
-                                                       '-r', str(ROOT / f'requirements-{system}.txt')])
+                builder.return_value.create.assert_called_once_with(self.install_root / '.venv-cli')
+                self.assertEqual(run.call_args.args[0], [str(self.install_root / '.venv-cli' / executable), '-m', 'pip', 'install',
+                                                       '-r', str(self.install_root / f'requirements-{system}.txt')])
 
     def test_release_contains_only_allowed_files_and_runs_without_site_packages(self):
         with tempfile.TemporaryDirectory(dir=ROOT / 'backend/data') as directory:
@@ -72,6 +82,7 @@ class NativeCliTests(unittest.TestCase):
                     self.assertNotIn('models.json', name)
                 prefix = next(iter(files)).split('/')[0]
                 payload = {name[len(prefix) + 1:]: data for name, data in files.items()}
+                self.assertIn('windows_security.py', payload)
                 manifest = json.loads(payload['edition.json'])
                 if manifest['platform'] == 'linux':
                     self.assertFalse(any(name.startswith('backend/') for name in payload))

@@ -16,6 +16,112 @@ import guard_models as models
 
 
 class GuardTests(unittest.TestCase):
+    def windows_row(self, record=1, event_id=4624, ip='-', logon_type='5'):
+        return dict(EventID=event_id, Channel='Security', Computer='WIN-TEST', RecordId=record,
+                    TimeCreated='2026-10-14T06:00:00Z',
+                    EventData=dict(TargetUserName='service-test', TargetDomainName='LAB',
+                                   IpAddress=ip, LogonType=logon_type))
+
+    def test_service_logons_without_ip_remain_evidence_without_ip_findings(self):
+        rows = [self.windows_row(i + 1) for i in range(30)]
+        reasons, diagnostics = {}, {}
+        events, rejected = guard.windows_events(rows, reasons, diagnostics)
+        self.assertEqual((len(events), rejected), (30, 0))
+        self.assertEqual(reasons, {})
+        self.assertEqual(diagnostics['source_ip_status'], {'not_recorded': 30})
+        self.assertEqual(diagnostics['logon_types'], {'5': 30})
+        self.assertTrue(all(e['ip'] is None and e['logon_type'] == '5' for e in events))
+        result = guard.detect(dict(events=events, rejected=rejected, windows_diagnostics=diagnostics))
+        self.assertEqual(result['coverage']['retained'], 30)
+        self.assertEqual(result['coverage']['ip_rule_eligible'], 0)
+        self.assertEqual(result['coverage']['retained_without_ip'], 30)
+        self.assertEqual(result['findings'], [])
+        self.assertEqual(guard.task_assessment(result)['status'], 'insufficient_data')
+        self.assertIn('已保留登录证据', guard.task_assessment(result)['label'])
+        self.assertEqual(guard.task_scope(result)['reasons'][0]['code'], 'source_ip_unavailable')
+        result.update(id='test', source='windows-local', demo=False, actions=[])
+        evidence = models.context(result)['evidence']
+        self.assertTrue(evidence)
+        self.assertTrue(all(e['ip'] is None and e['logon_type'] == '5' for e in evidence))
+
+    def test_missing_or_invalid_ip_never_fabricates_source_correlation(self):
+        rows = [self.windows_row(i + 1, event_id=4625, ip='-' if i < 6 else 'bad-ip', logon_type='3')
+                for i in range(12)]
+        events, rejected = guard.windows_events(rows)
+        result = guard.detect(dict(events=events, rejected=rejected))
+        self.assertEqual(result['coverage']['retained'], 12)
+        self.assertEqual(result['findings'], [])
+        self.assertEqual(guard.plan(result['findings']), [])
+        self.assertEqual(events[-1]['source_ip_status'], 'invalid')
+        valid = [self.windows_row(100 + i, event_id=4625, ip='192.0.2.1', logon_type='3') for i in range(5)]
+        more, _ = guard.windows_events(valid)
+        mixed = guard.detect(dict(events=events + more, rejected=0))
+        self.assertEqual(mixed['coverage']['ip_rule_eligible'], 5)
+        self.assertEqual(len(mixed['findings']), 1)
+        self.assertEqual(mixed['findings'][0]['failure_count'], 5)
+        self.assertEqual(mixed['findings'][0]['ip'], '192.0.2.1')
+
+    def test_exclusions_identify_event_ids_and_each_missing_required_field(self):
+        row = self.windows_row()
+        diagnostics, reasons = {}, {}
+        events, rejected = guard.windows_events([
+            {**row, 'EventID': 9998}, {**row, 'EventID': 9999},
+            {**row, 'Computer': '', 'RecordId': 0, 'TimeCreated': 'invalid',
+             'EventData': {'IpAddress': '-', 'LogonType': '5'}},
+        ], reasons, diagnostics)
+        self.assertEqual((events, rejected), ([], 3))
+        self.assertEqual(reasons, {'unsupported': 2, 'missing_metadata': 1})
+        self.assertEqual(diagnostics['unsupported_event_ids'], {'9998': 1, '9999': 1})
+        self.assertEqual(diagnostics['missing_fields'], {'record_id': 1, 'timestamp': 1, 'computer': 1, 'username': 1})
+        result = guard.detect(dict(events=[], rejected=rejected, rejected_reasons=reasons,
+                                   windows_diagnostics=diagnostics))
+        scope = guard.task_scope(result)
+        text = json.dumps(scope, ensure_ascii=False)
+        self.assertIn('9998', text)
+        self.assertIn('目标账户 1 条', text)
+        self.assertNotIn('source_ip', diagnostics['missing_fields'])
+
+    def test_windows_collector_filters_before_limit_and_keeps_scope_metadata(self):
+        sys.path.insert(0, str(ROOT / 'backend'))
+        rows = [self.windows_row()]
+        with patch('platform.system', return_value='Windows'), \
+                patch('app.services.log_reader.read_windows_logs', return_value=dict(events=rows,
+                      is_mock=False, read_status='success', channel_results=[dict(status='success', events_read=1)])) as read:
+            result = guard.collect_windows(limit=1000)
+        self.assertEqual(read.call_count, 8)
+        self.assertEqual(read.call_args_list[0].kwargs['event_ids'], [4624, 4625])
+        self.assertEqual(sum(c.kwargs['max_events'] for c in read.call_args_list), 1000)
+        self.assertEqual(len(result['events']), 8)
+        self.assertFalse(result['collection']['limit_reached'])
+        self.assertEqual(set(result['collection']['event_ids']), {4624, 4625, 5379, 4672, 4627, 4798, 4799, 5058, 5061})
+        self.assertEqual(result['windows_diagnostics']['event_ids'], {'4624': 8})
+
+    def test_windows_native_query_filters_server_side_and_closes_handles(self):
+        sys.path.insert(0, str(ROOT / 'backend'))
+        from app.services import log_reader
+        native = Mock()
+        native.EvtQueryReverseDirection = 512
+        handle = Mock()
+        native.EvtNext.return_value = [handle]
+        native.EvtRender.return_value = '''<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+        <System><EventID>4624</EventID><Channel>Security</Channel><Computer>WIN-TEST</Computer>
+        <EventRecordID>42</EventRecordID><TimeCreated SystemTime="2026-10-14T06:00:00Z"/></System>
+        <EventData><Data Name="TargetUserName">service-test</Data><Data Name="LogonType">5</Data>
+        <Data Name="IpAddress">-</Data></EventData></Event>'''
+        with patch.dict(sys.modules, win32evtlog=native):
+            rows, channels = log_reader._read_real_logs(['Security'], 1, [4624, 4625])
+        native.EvtQuery.assert_called_once_with('Security', 512, '*[System[(EventID=4624 or EventID=4625)]]')
+        handle.Close.assert_called_once()
+        native.EvtQuery.return_value.Close.assert_called_once()
+        self.assertEqual(channels[0]['events_read'], 1)
+        events, rejected = guard.windows_events(rows)
+        self.assertEqual((len(events), rejected), (1, 0))
+        self.assertEqual(events[0]['logon_type'], '5')
+        self.assertEqual(log_reader._event_query(None), '*')
+        for invalid in ([], ['4624'], [True], [-1], [65536], ['4624) or *']):
+            with self.assertRaises(ValueError):
+                log_reader._event_query(invalid)
+
     def test_dedup_conflicts_and_host_boundaries(self):
         collection = guard.demo_events('linux')
         original = deepcopy(collection)

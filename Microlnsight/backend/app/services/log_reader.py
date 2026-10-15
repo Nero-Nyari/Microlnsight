@@ -116,7 +116,17 @@ def _reader_context():
     return context
 
 
-def _read_real_logs(channels=None, max_events=200):
+def _event_query(event_ids):
+    if event_ids is None:
+        return "*"
+    ids = list(dict.fromkeys(event_ids))
+    if not ids or any(type(eid) is not int or not 0 <= eid <= 65535 for eid in ids):
+        raise ValueError("事件 ID 筛选必须是非空的 0–65535 整数列表")
+    return "*[System[(" + " or ".join(f"EventID={eid}" for eid in ids) + ")]]"
+
+
+def _read_real_logs(channels=None, max_events=200, event_ids=None):
+    query_text = _event_query(event_ids)
     results = []
     channels = list(dict.fromkeys(channels or CHANNELS))
     try:
@@ -132,7 +142,7 @@ def _read_real_logs(channels=None, max_events=200):
         count = 0
         result = {"channel": channel, "status": "success", "events_read": 0}
         try:
-            query = win32evtlog.EvtQuery(channel, win32evtlog.EvtQueryReverseDirection, "*")
+            query = win32evtlog.EvtQuery(channel, win32evtlog.EvtQueryReverseDirection, query_text)
             while count < max_events:
                 try:
                     batch = win32evtlog.EvtNext(query, min(32, max_events - count))
@@ -183,21 +193,25 @@ def read_windows_logs(
     channels: Optional[List[str]] = None,
     suspicious_only: bool = True,
     max_events: int = 200,
+    event_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Read Windows logs and return structured result.
 
     Returns dict with keys: events, stats, timestamp, is_mock.
     """
     is_windows = platform.system() == "Windows"
+    _event_query(event_ids)
 
     channel_results = []
     reader_context = None
     if is_windows:
-        raw_events, channel_results = _read_real_logs(channels, max_events)
+        raw_events, channel_results = _read_real_logs(channels, max_events, event_ids)
         reader_context = _reader_context()
         is_mock = False
     else:
         raw_events = _generate_mock_events(max_events)
+        if event_ids is not None:
+            raw_events = [e for e in raw_events if e['EventID'] in event_ids]
         is_mock = True
 
     warnings = [r["message"] for r in channel_results if r["status"] != "success"]
