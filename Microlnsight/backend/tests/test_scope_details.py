@@ -22,7 +22,7 @@ class ScopeDetailsTests(unittest.TestCase):
         row = dict(_COMM='sshd', _HOSTNAME='host', __REALTIME_TIMESTAMP='1791770400000000',
                    MESSAGE='Failed password for alice from 192.0.2.1 port 4000 ssh2')
         return '\n'.join([json.dumps(row),
-            json.dumps({**row, 'MESSAGE': 'Connection closed by 192.0.2.1 port 4000'}),
+            json.dumps({**row, 'MESSAGE': 'Unrecognized diagnostic message'}),
             json.dumps({**row, '_HOSTNAME': ''}),
             json.dumps({**row, '_COMM': 'webapp'}), '{bad json'])
 
@@ -79,7 +79,8 @@ class ScopeDetailsTests(unittest.TestCase):
             self.assertEqual(report['analysis_scope'], scope)
             self.assertEqual(guard_models.context(saved)['analysis_scope'], scope)
             self.assertEqual(store.get(task['id']), saved)
-            self.assertIn(scope['summary'], output.getvalue())
+            # Terminal wrapping may split the longer authentication/activity summary.
+            self.assertIn(''.join(scope['summary'].split()), ''.join(output.getvalue().split()))
             for reason in scope['reasons']:
                 self.assertIn(reason['label'], output.getvalue())
             self.assertIn('未读数量未知', json.dumps(report, ensure_ascii=False))

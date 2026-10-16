@@ -301,7 +301,7 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.ui.pending)
         await self.keys('2\r')
         await self.until(lambda: self.ui.pending)
-        self.assertIn('最多显示 100 条', self.ui.messages.text)
+        self.assertIn('全部已保存记录可导出 JSON', self.ui.messages.text)
         await self.keys('3\r')
         await self.until(lambda: self.ui.pending and '路径' in self.ui.prompt)
         target = Path(self.temp.name) / '中文导出.json'
@@ -313,6 +313,22 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         await self.keys('0\r')
         await self.until(lambda: not self.ui.running)
         self.assertEqual(self.ui.task_id, selected)
+
+    async def test_excluded_evidence_menu_shows_saved_raw_and_returns(self):
+        await self.command('/demo')
+        task = self.store.get(self.ui.task_id)
+        task['excluded_records'] = [dict(ref='ssh:8', reason='unsupported', raw='SYNTHETIC_UNKNOWN_MESSAGE')]
+        task['coverage']['excluded_evidence'] = dict(total=1, saved=1, omitted=0, truncated=0)
+        self.store.save(task)
+        await self.keys('/details\r')
+        await self.until(lambda: self.ui.pending and '查看排除记录' in self.ui.prompt)
+        await self.keys('4\r')
+        await self.until(lambda: self.ui.pending and 'SYNTHETIC_UNKNOWN_MESSAGE' in self.ui.messages.text)
+        self.assertIn('消息暂不支持', self.ui.messages.text)
+        self.assertIn('保存 1 条', self.ui.messages.text)
+        await self.keys('0\r')
+        await self.until(lambda: not self.ui.running)
+        self.assertEqual(self.ui.task_id, task['id'])
 
     async def test_resize_preserves_pending_input_and_cancel(self):
         await self.keys('/models\r')

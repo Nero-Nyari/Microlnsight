@@ -51,6 +51,13 @@ def show(task):
     if not coverage:
         _note('范围说明', '没有可核实的分析范围信息，请重新采集分析')
     _note('判断范围', '仅限已分析日志及当前规则，不能据此确认整机安全')
+    if coverage.get('ssh_activity_retained'):
+        section('SSH 会话活动')
+        for label, count in coverage['ssh_activity_types'].items():
+            _note(label, f'{count} 条')
+        _note('判断限制', '连接、会话及传输记录仅作上下文，不证明账户已获授权，也不计为登录成功或失败')
+    if coverage.get('excluded'):
+        _note('排除记录', '任务菜单输入 4 查看已保存原文、排除原因及保存范围；输入 3 导出')
     analysis = task.get('security_analysis', {})
     if analysis.get('event_types'):
         section('Windows Security 活动分析')
@@ -299,20 +306,46 @@ def chat(store, profiles, task_id):
 
 
 @cancellable
+def show_evidence(task, excluded=False):
+    from cli import _note
+    labels = {'unsupported': '消息暂不支持', 'missing_metadata': '必要字段缺失或无效',
+              'unknown_source': '来源无法确认', 'invalid': '日志格式无效'}
+    if excluded:
+        capture = task.get('coverage', {}).get('excluded_evidence')
+        if capture is None:
+            _note('原文不可用', '此任务未保存排除记录原文；需从系统日志重新采集，历史数量无法还原原文')
+            return
+        rows = task.get('excluded_records', [])
+        _note('排除记录保存范围', f"共 {capture['total']} 条，保存 {capture['saved']} 条，"
+              f"因容量限制未保存 {capture['omitted']} 条，原文截断 {capture['truncated']} 条")
+    else:
+        rows = task.get('events', [])
+    if not rows:
+        _note('证据', '没有可展示的记录')
+    for start in range(0, len(rows), 100):
+        for row in rows[start:start + 100]:
+            label = labels.get(row.get('reason'), row.get('reason')) if excluded else row.get('activity_label', row.get('kind'))
+            _note(f"{row['ref']} · {label}", row['raw'])
+            if row.get('raw_truncated'):
+                _note('原文截断', f"仅保存原文片段；完整记录 SHA256：{row['raw_sha256']}")
+        _note('证据展示范围', f"{start + 1}–{min(start + 100, len(rows))} / {len(rows)} 条；全部已保存记录可导出 JSON")
+        if start + 100 < len(rows):
+            choice('1 下一页  0 返回任务', ('1',), '1')
+
+
+@cancellable
 def task_detail(store, profiles, task):
     from cli import _note
     task_id = task['id']
     show(task)
     while True:
-        action = choice('1 向模型提问  2 查看证据  3 导出完整 JSON  0 返回', ('1', '2', '3'))
+        action = choice('1 向模型提问  2 查看登录与活动证据  3 导出完整 JSON  4 查看排除记录  0 返回', ('1', '2', '3', '4'))
         if action == '1':
             chat(store, profiles, task_id)
         elif action == '2':
-            for row in task.get('events', [])[:100]:
-                _note(row['ref'], row['raw'])
-                if row.get('raw_truncated'):
-                    _note('原文截断', f"仅保存前 4096 字符；完整记录 SHA256：{row['raw_sha256']}")
-            _note('证据展示范围', '最多显示 100 条；完整快照可导出')
+            show_evidence(task)
+        elif action == '4':
+            show_evidence(task, excluded=True)
         else:
             try:
                 def export_path(value):

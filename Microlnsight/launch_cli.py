@@ -4,6 +4,10 @@ import os
 import subprocess
 import sys
 
+if sys.version_info < (3, 10):
+    print('启动失败：需要 Python 3.10+，请使用安装环境的 Python 或 start-linux.sh。', file=sys.stderr)
+    raise SystemExit(1)
+
 from cli_update import recover, runtime_lock, runtime_python
 
 

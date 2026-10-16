@@ -41,6 +41,12 @@ jobs:
       - name: Analysis coverage explanations
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_scope_details.py -v
+      - name: SSH activity and excluded evidence
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_ssh_activity.py -v
+      - name: Linux interpreter selection
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_linux_launcher.py -v
       - name: Windows Security analysis contracts
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_windows_security.py -v

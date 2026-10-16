@@ -5,7 +5,7 @@ The store is separate from the existing incident database.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -21,6 +21,9 @@ import windows_security as security
 
 ROOT = Path(__file__).resolve().parent
 MAX_BYTES = 16 * 1024 * 1024
+MAX_EXCLUDED_RECORDS = 1000
+MAX_EXCLUDED_BYTES = 1024 * 1024
+MAX_EXCLUDED_RAW_BYTES = 4096
 
 
 def utcnow():
@@ -121,7 +124,23 @@ class TaskStore:
         return [dict(role=role, content=content) for role, content in reversed(rows)]
 
 
-def linux_events(text, rejected_reasons=None):
+def capture_excluded(capture, line, number, reason):
+    """Bound retained raw bytes and record count independently of input size."""
+    capture['total'] = capture.get('total', 0) + 1
+    records = capture.setdefault('records', [])
+    used = capture.get('raw_bytes', 0)
+    raw = line.encode('utf-8')
+    if len(records) >= MAX_EXCLUDED_RECORDS or used >= MAX_EXCLUDED_BYTES:
+        capture['omitted'] = capture.get('omitted', 0) + 1
+        return
+    excerpt = raw[:min(MAX_EXCLUDED_RAW_BYTES, MAX_EXCLUDED_BYTES - used)].decode('utf-8', errors='ignore')
+    capture['raw_bytes'] = used + len(excerpt.encode('utf-8'))
+    records.append(dict(ref=f'ssh:{number}', reason=reason, raw=excerpt,
+                        raw_sha256=hashlib.sha256(raw).hexdigest(),
+                        raw_truncated=len(excerpt.encode('utf-8')) < len(raw)))
+
+
+def linux_events(text, rejected_reasons=None, excluded_capture=None):
     from server_logs import parse_ssh_line
     events, rejected = [], 0
     for number, line in enumerate(text.splitlines(), 1):
@@ -132,11 +151,15 @@ def linux_events(text, rejected_reasons=None):
             rejected += 1
             if rejected_reasons is not None:
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+            if excluded_capture is not None:
+                capture_excluded(excluded_capture, line, number, reason)
             continue
         events.append(dict(platform='linux', host=event['host'], account=event['account'], ip=event['ip'],
                            kind=event['kind'], time=event['time'].isoformat(),
                            identity=str(event['identity'] or digest(line)), ref=f'ssh:{number}', raw=line[:4096],
                            raw_sha256=hashlib.sha256(line.encode()).hexdigest(), raw_truncated=len(line) > 4096))
+        if event['kind'] == 'ssh_activity':
+            events[-1].update(activity=event['activity'], activity_label=event['activity_label'])
     return events, rejected
 
 
@@ -207,6 +230,11 @@ def task_scope(task):
                f"{coverage.get('conflicts', 0)} 条冲突")
     if 'ip_rule_eligible' in coverage:
         summary += f"；其中 {coverage['ip_rule_eligible']} 条可按来源 IP 关联"
+    if 'ssh_activity_retained' in coverage:
+        summary = (f"已读取 {coverage.get('input', 0)} 条，保留 {coverage.get('retained', 0)} 条证据"
+                   f"（登录认证 {coverage['ssh_auth_retained']} 条，会话活动 {coverage['ssh_activity_retained']} 条）；"
+                   f"{coverage.get('excluded', 0)} 条排除，{coverage.get('duplicates', 0)} 条重复合并，"
+                   f"{coverage.get('conflicts', 0)} 条冲突。会话活动仅作上下文，不参与登录失败关联规则。")
     return dict(summary=summary, reasons=reasons, incomplete=bool(reasons))
 
 
@@ -226,6 +254,8 @@ def task_assessment(task):
         status, label = 'findings', '发现待核查线索'
     elif not coverage.get('retained'):
         status, label = 'insufficient_data', '数据不足，无法判断'
+    elif coverage.get('ssh_activity_retained') and not coverage.get('ssh_auth_retained'):
+        status, label = 'insufficient_data', '仅保留 SSH 会话活动，缺少登录认证证据，当前登录规则无法判断'
     elif coverage.get('ip_rule_eligible') == 0 and not coverage.get('security_audit_retained'):
         status, label = 'insufficient_data', '已保留登录证据，但无可用来源 IP，当前关联规则无法判断'
     else:
@@ -311,13 +341,14 @@ def collect_linux(target=None, minutes=15, limit=1000):
     if len(result.stdout) > MAX_BYTES:
         raise ValueError('本轮日志超过 16 MiB，请缩小时间或条数范围')
     text = result.stdout.decode('utf-8', errors='replace')
-    rejected_reasons = {}
-    events, rejected = linux_events(text, rejected_reasons)
+    rejected_reasons, excluded_capture = {}, {}
+    events, rejected = linux_events(text, rejected_reasons, excluded_capture)
     warnings = [result.stderr.decode('utf-8', errors='replace').strip()] if result.stderr.strip() else []
     if len(text.splitlines()) >= limit:
         warnings.append('达到采集上限；更早记录可能未读取，未读数量未知')
     warnings.append(f'仅覆盖 SSH journal，最近 {minutes} 分钟；未采集应用和文件审计日志')
-    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons, warnings=warnings,
+    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons,
+                excluded_capture=excluded_capture, warnings=warnings,
                 collection=dict(limit=limit, minutes=minutes, limit_reached=len(text.splitlines()) >= limit,
                                 warning=bool(result.stderr.strip())),
                 scope_incomplete=bool(result.stderr.strip() or len(text.splitlines()) >= limit))
@@ -330,9 +361,10 @@ def collect_export(directory):
     if path.stat().st_size > MAX_BYTES:
         raise ValueError('SSH 导出超过 16 MiB，请缩小导出范围')
     data = path.read_bytes()
-    rejected_reasons = {}
-    events, rejected = linux_events(data.decode('utf-8', errors='replace'), rejected_reasons)
-    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons, source_sha256=hashlib.sha256(data).hexdigest(),
+    rejected_reasons, excluded_capture = {}, {}
+    events, rejected = linux_events(data.decode('utf-8', errors='replace'), rejected_reasons, excluded_capture)
+    return dict(events=events, rejected=rejected, rejected_reasons=rejected_reasons,
+                excluded_capture=excluded_capture, source_sha256=hashlib.sha256(data).hexdigest(),
                 warnings=['历史导出仅用于复盘；防护建议不代表当前服务器状态'])
 
 
@@ -422,6 +454,21 @@ def detect(collection):
     result['coverage']['scope_incomplete'] = bool(collection.get('scope_incomplete'))
     result['coverage']['excluded_reasons'] = dict(collection.get('rejected_reasons', {}))
     result['coverage']['collection'] = dict(collection.get('collection', {}))
+    if 'excluded_capture' in collection:
+        capture = collection['excluded_capture']
+        result['excluded_records'] = list(capture.get('records', []))
+        result['coverage']['excluded_evidence'] = dict(
+            total=capture.get('total', 0), saved=len(result['excluded_records']), omitted=capture.get('omitted', 0),
+            truncated=sum(r['raw_truncated'] for r in result['excluded_records']),
+            raw_bytes=capture.get('raw_bytes', 0), max_records=MAX_EXCLUDED_RECORDS,
+            max_raw_bytes=MAX_EXCLUDED_BYTES, max_record_bytes=MAX_EXCLUDED_RAW_BYTES)
+    if any(r['platform'] == 'linux' for r in rows):
+        result['coverage']['ssh_auth_retained'] = sum(r['kind'] in ('success', 'failure') for r in rows)
+        result['coverage']['ssh_activity_retained'] = sum(r['kind'] == 'ssh_activity' for r in rows)
+        result['coverage']['ssh_activity_types'] = dict(Counter(
+            r['activity_label'] for r in rows if r['kind'] == 'ssh_activity'))
+        result['coverage']['ip_rule_eligible'] = sum(
+            r['kind'] in ('success', 'failure') and bool(address(r.get('ip'))) for r in rows)
     if 'windows_diagnostics' in collection or any(r['platform'] == 'windows' for r in rows):
         result['coverage']['windows_diagnostics'] = dict(collection.get('windows_diagnostics', {}))
         auth_rows = [r for r in rows if r['kind'] in ('success', 'failure')]
