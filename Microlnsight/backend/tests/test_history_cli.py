@@ -64,6 +64,7 @@ class ReportWorkflowTests(unittest.TestCase):
         self.assertEqual(len(list((report / 'questions').glob('*.json'))), 1)
         self.assertIn('仅发送本批 40 条', output.getvalue())
         self.assertIn('已保存的本地模型回答', output.getvalue())
+        self.assertIn('引用日志时间：2026-10-16 16:35:00 UTC+08:00', output.getvalue())
 
     def test_prepare_without_send_and_reopen(self):
         with patch.object(ui, 'sources', return_value=self.entries), \
@@ -146,6 +147,29 @@ class ReportWorkflowTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 with engine.run_lock(self.root / '.lock'):
                     self.fail('second writer acquired lock')
+
+    def test_reference_times_use_evidence_not_model_text(self):
+        rows = [dict(ref='ssh:1', time='2026-10-16T00:01:00+08:00'),
+                dict(ref='ssh:2', time='2026-10-15T15:59:00+00:00'),
+                dict(ref='ssh:3', time='2026-10-16T12:00:00')]
+        self.assertEqual(engine.evidence_times(['ssh:1'], rows), '2026-10-16 00:01:00 UTC+08:00')
+        self.assertEqual(engine.evidence_times(['ssh:1', 'ssh:2'], rows),
+                         '2026-10-15 23:59:00 UTC+08:00 → 2026-10-16 00:01:00 UTC+08:00')
+        self.assertIn('另有 2 条引用时间未知', engine.evidence_times(['ssh:1', 'ssh:3', 'missing'], rows))
+        self.assertIn('时间未知', engine.evidence_times(['missing'], rows))
+
+    def test_export_old_report_adds_times_without_inference_or_changes(self):
+        args = self.prepare()
+        with patch.object(engine, 'request_model', side_effect=lambda u, m, r, **kw: (answer(r), {})), redirect_stdout(io.StringIO()):
+            engine.run(args)
+        (args.output / 'report.md').write_text('old report without times', encoding='utf-8')
+        before = {str(p): p.read_bytes() for p in args.output.rglob('*') if p.is_file()}
+        with patch.object(engine, 'request_model') as model:
+            text = engine.saved_report(args.output)
+        model.assert_not_called()
+        self.assertIn('本批日志时间：2026-10-16 16:35:00 UTC+08:00', text)
+        self.assertIn('引用日志时间：2026-10-16 16:35:00 UTC+08:00', text)
+        self.assertEqual(before, {str(p): p.read_bytes() for p in args.output.rglob('*') if p.is_file()})
 
 
 if __name__ == '__main__':

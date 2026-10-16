@@ -197,10 +197,12 @@ def select_report(data_dir):
             return chunk[int(selected) - 1][0]
 
 
-def show_answer(answer, title):
+def show_answer(answer, title, rows):
     lines = [answer['summary'], '']
     for key, label in (('observations', '观察'), ('concerns', '待核实线索')):
-        lines += [f"- {label}：{item['text']}（{', '.join(item['refs'])}）" for item in answer[key]]
+        for item in answer[key]:
+            lines += [f"- {label}：{item['text']}（{', '.join(item['refs'])}）",
+                      '  引用日志时间：' + engine.evidence_times(item['refs'], rows)]
     lines += ['', '限制：' + answer['limitations']]
     model_answer('\n'.join(lines), title)
 
@@ -220,7 +222,7 @@ def batch_detail(output, checkpoint):
         section(f"批次 {index}/{manifest['batch_count']} · {rows[0]['time']} → {rows[-1]['time']} · {len(rows)} 条")
         if result.get('status') == 'accepted':
             engine.validate_saved(result, rows)
-            show_answer(result['answer'], '本地模型分析（需核实）')
+            show_answer(result['answer'], '本地模型分析（需核实）', rows)
         else:
             _note('尚未完成', '本批没有通过检查的完整回答，请返回报告菜单开始或续跑')
         action = choice('n 下一批  p 上一批  e 本批原文  a 问本地模型  h 查看本批追问  0 返回', ('n', 'p', 'e', 'a', 'h'))
@@ -252,7 +254,7 @@ def batch_detail(output, checkpoint):
             folder.mkdir(exist_ok=True, mode=0o700)
             engine.save(folder / (uuid.uuid4().hex + '.json'), dict(batch=index, question=question, answer=answer,
                         metadata=metadata, destination=target, created=datetime.now(timezone.utc).isoformat()))
-            show_answer(answer, '本地模型回答（仅针对本批，需核实）')
+            show_answer(answer, '本地模型回答（仅针对本批，需核实）', rows)
         elif action == 'h':
             saved = [read(path) for path in (output / 'questions').glob('*.json')]
             selected = sorted((item for item in saved if item['batch'] == index), key=lambda item: item['created'])
@@ -260,7 +262,7 @@ def batch_detail(output, checkpoint):
                 _note('暂无追问', '本批还没有保存的模型追问')
             for item in selected:
                 _note('问题 · ' + item['created'], item['question'])
-                show_answer(item['answer'], '已保存的本地模型回答（需核实）')
+                show_answer(item['answer'], '已保存的本地模型回答（需核实）', rows)
 
 
 def check_question(value):
@@ -286,8 +288,9 @@ def report_menu(output, profiles, checkpoint):
                     _note('暂无模型报告', '请先开始分析；证据快照已经保存在报告目录')
                     continue
                 destination = Path(field('导出 .md 文件完整路径（目标必须不存在）')).expanduser()
+                text = engine.saved_report(output)
                 with destination.open('x', encoding='utf-8') as stream:
-                    stream.write(report.read_text(encoding='utf-8'))
+                    stream.write(text)
                 _note('已导出', destination)
             else:
                 model_answer('```json\n' + json.dumps(manifest['statistics'], ensure_ascii=False, indent=2) + '\n```', '本地程序统计（不是模型推测）')

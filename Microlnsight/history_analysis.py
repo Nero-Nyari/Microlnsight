@@ -271,14 +271,37 @@ def run_lock(path):
             yield
 
 
-def report(root, manifest, results, binding):
+def evidence_times(refs, rows):
+    """Use saved evidence timestamps, never timestamps invented in model prose."""
+    by_ref = {row['ref']: row for row in rows}
+    values, missing = [], 0
+    for ref in dict.fromkeys(refs):
+        try:
+            value = datetime.fromisoformat(by_ref[ref]['time'])
+            if value.utcoffset() is None:
+                raise ValueError('Missing timezone')
+            values.append(value)
+        except (KeyError, TypeError, ValueError):
+            missing += 1
+    if not values:
+        return '时间未知（引用证据或带时区的时间缺失）'
+    zone = values[0].tzinfo
+    def display(value):
+        value = value.astimezone(zone)
+        offset = value.strftime('%z')
+        return value.replace(tzinfo=None).isoformat(sep=' ') + ' UTC' + offset[:3] + ':' + offset[3:]
+    first, last = min(values), max(values)
+    text = display(first) if first == last else display(first) + ' → ' + display(last)
+    return text + (f'；另有 {missing} 条引用时间未知' if missing else '')
+
+
+def report_text(manifest, results, binding, rows):
     accepted = [r for r in results if r['status'] == 'accepted']
     count = sum(len(r['refs']) for r in accepted)
     state = {'completed': len(accepted) == manifest['batch_count'], 'accepted_batches': len(accepted),
              'total_batches': manifest['batch_count'], 'accepted_records': count,
              'total_records': manifest['record_count'], 'model_destination': binding,
              'failed_batches': [r['batch'] for r in results if r['status'] != 'accepted']}
-    save(root / 'status.json', state)
     lines = ['# 公网服务器 SSH 历史日志分析', '',
              f"本地模型：{binding['model']}，地址：{binding['url']}。", '',
              f"实际归档范围：{manifest['actual_first']} 至 {manifest['actual_last']}。",
@@ -292,6 +315,7 @@ def report(root, manifest, results, binding):
              '## 各批本地模型分析', '']
     for item in results:
         lines += [f"### 批次 {item['batch']}：{item['status']}", '']
+        lines += ['本批日志时间：' + evidence_times(item['refs'], rows), '']
         if item['status'] != 'accepted':
             lines += ['未取得通过检查的完整模型回答，见对应 results 文件。', '']
             continue
@@ -302,9 +326,38 @@ def report(root, manifest, results, binding):
         for label, key in (('观察', 'observations'), ('待核实线索', 'concerns')):
             for finding in answer[key]:
                 lines += [f"- {label}：{finding['text']}（证据：{', '.join(finding['refs'])}）"]
+                lines += ['  引用日志时间：' + evidence_times(finding['refs'], rows)]
         lines += ['', '限制：' + answer['limitations'], '']
-    (root / 'report.md').write_text('\n'.join(lines), encoding='utf-8')
+    return '\n'.join(lines), state
+
+
+def report(root, manifest, results, binding):
+    rows = json.loads((root / 'evidence.json').read_bytes())
+    text, state = report_text(manifest, results, binding, rows)
+    save(root / 'status.json', state)
+    (root / 'report.md').write_text(text, encoding='utf-8')
     return state
+
+
+def saved_report(root):
+    """Render older results with current formatting without inference or mutation."""
+    manifest = json.loads((root / 'manifest.json').read_bytes())
+    rows = json.loads((root / 'evidence.json').read_bytes())
+    if digest(rows) != manifest['evidence_sha256']:
+        raise ValueError('Prepared inputs changed.')
+    binding = json.loads((root / 'destination.json').read_bytes())
+    results = []
+    for index, chunk in enumerate(batches(rows), 1):
+        path = root / 'results' / f'{index:04}.json'
+        if not path.exists():
+            continue
+        result = json.loads(path.read_bytes())
+        if result['batch'] != index or result['refs'] != [r['ref'] for r in chunk]:
+            raise ValueError('Saved batch references changed.')
+        if result['status'] == 'accepted':
+            validate_saved(result, chunk)
+        results.append(result)
+    return report_text(manifest, results, binding, rows)[0]
 
 
 def model_origin(value):
