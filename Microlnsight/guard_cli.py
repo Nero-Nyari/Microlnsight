@@ -382,7 +382,7 @@ def task_menu(store, profiles):
 
 
 @cancellable
-def wizard(store, profiles, *, on_task=None):
+def wizard(store, profiles, *, on_task=None, checkpoint=lambda: None):
     import platform
     from cli import _heading, _note
     from guard import plan
@@ -390,8 +390,12 @@ def wizard(store, profiles, *, on_task=None):
     if system not in ('windows', 'linux'):
         raise ValueError('本机版本只支持 Windows 或 Linux')
     _heading(f'{system.title()} 本机采集与防护建议', '回车采用默认值 · 0 返回 · 仅提供建议，尚未执行')
-    print(f'  1 读取本机 {system.title()} 日志（默认）\n  2 本机导出目录\n  3 本平台合成演示')
-    source_choice = choice('来源', ('1', '2', '3'), '1')
+    print(f'  1 读取本机 {system.title()} 日志（默认）\n  2 本机导出目录\n  3 本平台合成演示\n  4 历史 SSH 归档 · 本地模型分批报告')
+    source_choice = choice('来源', ('1', '2', '3', '4'), '1')
+    if source_choice == '4':
+        from history_cli import menu
+        menu(profiles.path.parent.parent, profiles, checkpoint=checkpoint)
+        return
     if source_choice == '1':
         source = f'{system}-local'
         collector, demo = (collect_windows if system == 'windows' else collect_linux), False

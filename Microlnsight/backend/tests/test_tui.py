@@ -78,6 +78,21 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.ui.secret)
         self.assertFalse(self.profiles.path.exists())
 
+    async def test_reports_entry_and_scan_route_cancel(self):
+        self.pipe.send_text('/reports\r')
+        await self.until(lambda: self.ui.pending)
+        self.assertIn('新建历史分析', self.ui.prompt)
+        self.pipe.send_text('0\r')
+        await self.until(lambda: not self.ui.running)
+        self.pipe.send_text('/scan\r')
+        await self.until(lambda: self.ui.pending and '来源' in self.ui.prompt)
+        self.pipe.send_text('4\r')
+        await self.until(lambda: self.ui.pending and '新建历史分析' in self.ui.prompt)
+        self.pipe.send_text('\x03')
+        await self.until(lambda: not self.ui.running)
+        self.assertFalse(self.ui.pending)
+        self.assertIsNone(self.ui.task_id)
+
     async def test_hidden_key_and_denied_remote_consent_never_send(self):
         await self.command('/demo')
         self.profiles.put('remote', dict(kind='openai', base_url='https://example.com/v1', model='demo'))

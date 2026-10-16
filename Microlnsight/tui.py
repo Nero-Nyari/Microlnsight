@@ -38,6 +38,7 @@ from terminal_ui import Cancelled, input_handler, model_answer, output_width
 
 COMMANDS = {
     '/scan': '分析本机日志', '/tasks': '打开任务与证据',
+    '/reports': '历史报告分析、查看与续跑',
     '/models': '配置或切换模型', '/demo': '运行合成演示',
     '/details': '当前任务详情与导出', '/status': '查看模型诊断',
     '/parameters': '模型参数', '/check-update': '检查更新',
@@ -46,6 +47,7 @@ COMMANDS = {
     '/sidebar': '显示 / 隐藏侧栏', '/help': '查看全部命令', '/exit': '退出',
 }
 ALIASES = dict(zip('1234560', ('/scan', '/tasks', '/models', '/demo', '/check-update', '/update', '/exit')))
+ALIASES['7'] = '/reports'
 
 STYLE = Style.from_dict({
     '': '#dce2ec',
@@ -399,6 +401,7 @@ class Workbench:
         line('/scan    分析本机日志', 'class:accent')
         line('/demo    体验合成演示', 'class:accent')
         line('/tasks   打开历史任务', 'class:accent')
+        line('/reports 历史报告分析', 'class:accent')
         line('/models  配置或切换模型', 'class:accent')
         if size.rows < 22:
             return rows
@@ -457,6 +460,7 @@ class Workbench:
             line('/tasks 打开历史任务', 'class:accent')
         line()
         line('防护建议尚未执行', 'class:warning')
+        line('/reports 历史报告分析', 'class:accent')
         line('/workspace 工作区详情', 'class:muted')
         return rows
 
@@ -624,13 +628,20 @@ class Workbench:
             input_handler.reset(token)
 
     def dispatch(self, command):
-        if command == '/demo':
+        def checkpoint():
+            if self.cancel_requested.is_set():
+                raise Cancelled()
+        if command == '/reports':
+            from history_cli import menu
+            menu(self.data_dir, self.profiles, checkpoint=checkpoint)
+        elif command == '/demo':
             task = run_task(self.store, f'demo:{self.system}', lambda: demo_events(self.system), demo=True)
             self.task_id = task['id']
             guard_cli.show(task)
         elif command == '/scan':
             guard_cli.wizard(self.store, self.profiles,
-                             on_task=lambda task: self.loop.call_soon_threadsafe(self.select_task, task['id']))
+                             on_task=lambda task: self.loop.call_soon_threadsafe(self.select_task, task['id']),
+                             checkpoint=checkpoint)
         elif command == '/models':
             guard_cli.configure(self.profiles)
         elif command == '/parameters':

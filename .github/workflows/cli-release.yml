@@ -47,6 +47,12 @@ jobs:
       - name: Linux interpreter selection
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_linux_launcher.py -v
+      - name: Historical SSH batch analysis
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_ssh_history_analysis.py -v
+      - name: Historical report workflow
+        working-directory: Microlnsight
+        run: python -X utf8 -m unittest discover -s backend/tests -p test_history_cli.py -v
       - name: Windows Security analysis contracts
         working-directory: Microlnsight
         run: python -X utf8 -m unittest discover -s backend/tests -p test_windows_security.py -v

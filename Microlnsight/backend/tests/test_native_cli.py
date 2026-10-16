@@ -83,7 +83,10 @@ class NativeCliTests(unittest.TestCase):
                 prefix = next(iter(files)).split('/')[0]
                 payload = {name[len(prefix) + 1:]: data for name, data in files.items()}
                 self.assertIn('windows_security.py', payload)
+                self.assertIn('history_analysis.py', payload)
+                self.assertIn('history_cli.py', payload)
                 manifest = json.loads(payload['edition.json'])
+                self.assertNotIn(b'\r', payload[f"requirements-{manifest['platform']}.txt"])
                 if manifest['platform'] == 'linux':
                     self.assertFalse(any(name.startswith('backend/') for name in payload))
                     self.assertNotIn(b'\r', payload['start-linux.sh'])
@@ -104,6 +107,10 @@ class NativeCliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn('合成演示数据', result.stdout)
                     self.assertIn('尚未执行', result.stdout)
+                    result = subprocess.run([sys.executable, '-S', '-X', 'utf8', str(unpacked / 'agent.py'), 'reports'],
+                                            input='0\n', cwd=unpacked, capture_output=True, text=True, encoding='utf-8', timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('历史报告分析', result.stdout)
                 else:
                     with patch('agent.ROOT', unpacked):
                         with self.assertRaisesRegex(ValueError, '安装包'):

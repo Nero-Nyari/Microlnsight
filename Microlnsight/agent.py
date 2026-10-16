@@ -45,6 +45,7 @@ def _main(argv=None):
             command.add_argument('--allow-remote-model', action='store_true', help='允许将证据摘要发送到所选非本机模型')
         subs.add_parser('demo', help='本平台合成演示')
         subs.add_parser('models', help='配置本机模型或 API 接口')
+        subs.add_parser('reports', help='历史 SSH 归档分批模型分析、报告与续跑')
         subs.add_parser('check-update', help='检查 GitHub 仓库已发布的 CLI 版本')
         update = subs.add_parser('update', help='校验并安装新版，保留本机数据与配置')
         update.add_argument('--yes', action='store_true', help='确认安装可用的已发布版本')
@@ -62,6 +63,11 @@ def _main(argv=None):
                 command(ROOT, execute=args.operation == 'update', yes=getattr(args, 'yes', False))
             return 0
         database = args.data_dir.expanduser().resolve() / 'agent.db'
+        if args.operation == 'reports':
+            from history_cli import menu
+            _, profiles = resources(database)
+            menu(database.parent, profiles)
+            return 0
         if args.operation in ('scan', 'watch'):
             args.command, args.source = 'guard', system
             args.ssh, args.directory, args.database = None, None, database
@@ -90,11 +96,11 @@ def _main(argv=None):
                 _note('本机数据目录', database.parent)
                 active = profiles.load()
                 _note('当前模型', (active['active'] + ' / ' + active['profiles'][active['active']]['model']) if active['active'] else '尚未配置，可先运行规则分析')
-                menu_group('分析与核查', [('1', '本机日志分析与防护建议'), ('2', '任务、证据与模型追问'), ('4', '本平台合成演示')])
+                menu_group('分析与核查', [('1', '本机日志分析与防护建议'), ('2', '任务、证据与模型追问'), ('4', '本平台合成演示'), ('7', '历史报告分析与本地模型')])
                 menu_group('模型与维护', [('3', '模型配置与选择'), ('5', '检查更新'), ('6', '更新并退出')])
                 menu_group('结束', [('0', '退出')])
                 print()
-                choice = read_line('  选择 [0-6] > ')
+                choice = read_line('  选择 [0-7] > ')
                 try:
                     if choice == '0':
                         return 0
@@ -106,12 +112,15 @@ def _main(argv=None):
                         configure(profiles)
                     elif choice == '4':
                         show(run_task(store, f'demo:{system}', lambda: demo_events(system), demo=True))
+                    elif choice == '7':
+                        from history_cli import menu
+                        menu(database.parent, profiles)
                     elif choice in ('5', '6'):
                         from cli_update import command
                         if command(ROOT, execute=choice == '6'):
                             return 0
                     else:
-                        _note('输入有误', '请选择 0–6')
+                        _note('输入有误', '请选择 0–7')
                 except (ValueError, OSError, RuntimeError) as exc:
                     _note('操作失败', exc)
     except (Cancelled, KeyboardInterrupt, EOFError):

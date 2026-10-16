@@ -10,7 +10,8 @@ from cli_update import VERSION, version as parse_version
 
 ROOT = Path(__file__).resolve().parent
 COMMON = ('agent.py', 'cli.py', 'guard.py', 'guard_cli.py', 'guard_models.py', 'windows_security.py',
-          'server_logs.py', 'install_cli.py', 'NATIVE_CLI.md', 'cli_update.py', 'launch_cli.py', 'terminal_ui.py', 'tui.py')
+          'server_logs.py', 'install_cli.py', 'NATIVE_CLI.md', 'cli_update.py', 'launch_cli.py', 'terminal_ui.py', 'tui.py',
+          'history_analysis.py', 'history_cli.py')
 WINDOWS = ('backend/app/__init__.py', 'backend/app/agents/__init__.py',
            'backend/app/agents/event_context.py', 'backend/app/services/__init__.py',
            'backend/app/services/log_reader.py')
@@ -28,7 +29,7 @@ def build(output, version=VERSION, legacy_aliases=True):
             names.extend(WINDOWS)
         files = {name: (ROOT / name).read_bytes() for name in names}
         for name in files:
-            if name.endswith('.sh'):
+            if name.endswith('.sh') or name.startswith('requirements-'):
                 files[name] = files[name].replace(b'\r\n', b'\n')
         files['edition.json'] = json.dumps(dict(platform=system, distribution='native-cli-source',
                                                 python='>=3.10', response_mode='simulation',
