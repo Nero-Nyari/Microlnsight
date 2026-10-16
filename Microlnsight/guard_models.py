@@ -19,6 +19,7 @@ SYSTEM = '''你是 Microlnsight 运维分析助手。用中文解释日志、引
 没有任何字段证明其余活动正常或账户已获授权。禁止将未命中规则、返回成功或正常程序名称概括为“其余/大多/全部活动正常、安全、没有风险”。使用“当前规则和提供的证据样本未显示其他明确异常；不能据此确认正常”。解释具体操作返回成功时必须注明事件或统计范围。
 4672 单独出现只作为特权活动记录，不应重述为权限提升异常或新增待核查线索；即使有管理员组或交互登录信息也不等于授权已确认。有额外异常证据才结合解释。历史回答可能沿用旧规则，不得作为本次事实依据。
 Windows 登录事件可能没有来源 IP；保留的无 IP 记录仍是登录证据，但不参与按来源 IP 关联的规则。不要把它们称为解析失败，也不得编造 IP 或封禁建议。
+Linux 的 ssh_activity 是连接、会话开关、子进程或传输统计，只作上下文，不计为认证成功/失败，不证明授权或安全。缺少账户/IP时保持未知，不拼接推测会话身份。coverage.ssh_auth_retained 和 ssh_activity_retained 分别统计认证和会话活动。排除原文仅保存在本地，未包含在 evidence 中时不得声称已查看。
 Windows 其他 Security 活动依据 security_analysis 分类解释：5379 频繁读取或非零返回码不单独证明凭据窃取；4672 是会话特权分配；4627 是组成员快照，不是变更；4798/4799 是枚举，不是修改；5058/5061 的错误也可能来自应用或权限配置。审计事件无来源 IP 不影响这类分析。missing_details 表示判断受限，不能补造字段；证据仅为抽样，不能由样本次数推算总数。
 规则命中是待核实的线索，不等于入侵成功。Windows 和 Linux 核查方法要匹配证据平台。
 本系统仅提供防护建议，尚未执行任何处置；你没有执行工具和系统权限。
@@ -179,7 +180,7 @@ def context(task):
     # Reserve evidence for every event class before filling with finding samples.
     classes = {}
     for row in events:
-        classes.setdefault(row.get('event_id', row['kind']), row)
+        classes.setdefault(row.get('event_id') or row.get('activity') or row['kind'], row)
     chosen = list(classes.values())
     selected = {r['ref'] for r in chosen}
     by_ref = {r['ref']: r for r in events}
@@ -203,7 +204,7 @@ def context(task):
         payload['model_diagnostic'] = diagnostic
     for row in chosen:
         item = {k: row[k] for k in ('ref', 'platform', 'host', 'account', 'ip', 'kind', 'time')}
-        for key in ('event_id', 'logon_type', 'source_ip_status'):
+        for key in ('event_id', 'logon_type', 'source_ip_status', 'activity', 'activity_label'):
             if key in row:
                 item[key] = row[key]
         if row.get('security'):
@@ -217,8 +218,8 @@ def context(task):
             payload['evidence'].pop()
             break
     payload['omitted_evidence'] = len(events) - len(payload['evidence'])
-    totals = Counter(str(r.get('event_id') or r['kind']) for r in events)
-    samples = Counter(str(r.get('event_id') or r['kind']) for r in payload['evidence'])
+    totals = Counter(str(r.get('event_id') or r.get('activity') or r['kind']) for r in events)
+    samples = Counter(str(r.get('event_id') or r.get('activity') or r['kind']) for r in payload['evidence'])
     payload['evidence_scope'] = dict(retained_records=len(events), sent_samples=len(payload['evidence']),
         omitted_records=payload['omitted_evidence'], per_type=[dict(event_type=k, retained=v, sent_samples=samples[k]) for k, v in sorted(totals.items())],
         sampling='按事件类别和规则线索选取有限片段，非随机抽样，不可推算正常活动比例',

@@ -21,10 +21,21 @@ LOG_FILES = (
     "kernel-warnings.journal.log", "mysql-error.log", "nginx-mysql.journal.log",
 )
 MAX_FILE_BYTES = 100 * 1024 * 1024
-RULE_VERSION = 3
+RULE_VERSION = 4
 HTTP_WINDOW_SECONDS = 120
 SSH_FAILURE = re.compile(r"Failed password for (?:invalid user )?(?P<account>.+?) from (?P<ip>\S+) port \d+")
 SSH_SUCCESS = re.compile(r"Accepted (?P<method>\S+) for (?P<account>.+?) from (?P<ip>\S+) port \d+")
+SSH_ACTIVITIES = (
+    ('connection_open', '建立连接', r'Connection from (?P<ip>\S+) port \d+ on \S+ port \d+(?: rdomain "[^"]*")?'),
+    ('session_open', '打开会话', r'pam_unix\(sshd:session\): session opened for user (?P<account>[^\s(]+)(?:\(uid=\d+\))? by .*\(uid=\d+\)'),
+    ('session_close', '关闭会话', r'pam_unix\(sshd:session\): session closed for user (?P<account>\S+)'),
+    ('child_process', '创建会话进程', r'User child is on pid \d+'),
+    ('shell_start', '启动终端', r'Starting session: shell on \S+ for (?P<account>\S+) from (?P<ip>\S+) port \d+ id \d+'),
+    ('connection_closed', '对端断开连接', r'Connection closed by (?P<ip>\S+) port \d+'),
+    ('shell_close', '结束终端会话', r'Close session: user (?P<account>\S+) from (?P<ip>\S+) port \d+ id \d+'),
+    ('transfer', '连接传输统计', r'Transferred: sent \d+, received \d+ bytes'),
+    ('connection_closing', '关闭连接', r'Closing connection to (?P<ip>\S+) port \d+'),
+)
 PROBE_MARKERS = ("/.env", "/.git/", "/wp-admin", "/wp-login", "/phpmyadmin",
                  "/actuator", "/server-status", "/cgi-bin/", "/etc/passwd")
 
@@ -75,7 +86,7 @@ def _ip(value: str) -> str | None:
 
 
 def parse_ssh_line(line: str) -> tuple[dict | None, str]:
-    """Shared authentication parser for journal JSON and exported journal text.
+    """Shared authentication/activity parser for JSON and journal text.
 
     A filename or a quoted authentication message is not evidence of sshd origin.
     Missing metadata stays excluded; callers retain the raw source and count it.
@@ -106,6 +117,17 @@ def parse_ssh_line(line: str) -> tuple[dict | None, str]:
         failure, success = SSH_FAILURE.match(message), SSH_SUCCESS.match(message)
         match = failure or success
         if not match:
+            for activity, label, pattern in SSH_ACTIVITIES:
+                activity_match = re.fullmatch(pattern, message)
+                if not activity_match:
+                    continue
+                fields = activity_match.groupdict()
+                ip = _ip(fields['ip']) if fields.get('ip') else None
+                if not (isinstance(host, str) and host.strip() and when) or (fields.get('ip') and not ip):
+                    return None, 'missing_metadata'
+                return dict(time=when.astimezone(timezone.utc), host=host.strip().casefold(),
+                            ip=ip, account=fields.get('account'), kind='ssh_activity',
+                            activity=activity, activity_label=label, method=None, identity=identity), ''
             return None, 'unsupported'
         ip = _ip(match['ip'])
         account = match['account'].strip()
@@ -267,7 +289,7 @@ def analyze_directory(source: str | Path) -> dict:
             warnings.append(f"{name} 超过单文件 {MAX_FILE_BYTES // (1024 * 1024)} MB 上限，已跳过；跳过行数未知，请分段导出。")
 
     failed, accepted, nginx_requests, app_requests, exceptions = [], [], [], [], []
-    service_events, startup_errors = [], []
+    service_events, startup_errors, ssh_activities = [], [], []
     ssh_sources, ssh_accounts, status_counts, app_event_types, app_errors = (Counter() for _ in range(5))
     malformed_json, unstructured_lines, probe_requests, nginx_errors = Counter(), Counter(), [], []
     operation_reasons = Counter()
@@ -292,8 +314,10 @@ def analyze_directory(source: str | Path) -> dict:
                 failed.append(item)
                 ssh_sources[item["ip"]] += 1
                 ssh_accounts[item["account"]] += 1
-            else:
+            elif item['kind'] == 'success':
                 accepted.append(item)
+            else:
+                ssh_activities.append(item)
 
     nginx_path = directory / "nginx-security-access.log"
     if nginx_path.is_file():
@@ -471,7 +495,7 @@ def analyze_directory(source: str | Path) -> dict:
                     + sum(operation_reasons.values())
                     + sum(item["category"] != "其他" for item in nginx_errors)
                     + sum(count for category, count in system_error_categories.items() if category != "其他系统错误"))
-    analysis_status = 'findings' if signal_count else 'no_findings' if quality['parsed'] else 'insufficient_data'
+    analysis_status = 'findings' if signal_count else 'no_findings' if quality['parsed'] > len(ssh_activities) else 'insufficient_data'
     assessment = ("数据不足，无法判断" if analysis_status == 'insufficient_data' else
                   "发现待核查线索" if signal_count else "在已分析范围内未发现规则线索")
     quality['scope_incomplete'] = bool(quality['unparsed'] or quality['invalid'] or quality['missing_time']
@@ -484,6 +508,8 @@ def analyze_directory(source: str | Path) -> dict:
         "files": files, "checks": checks, "warnings": warnings,
         "time_range": {"start": min(starts) if starts else None, "end": max(ends) if ends else None},
         "ssh": {"failed": len(failed), "accepted": len(accepted), "distinct_failure_ips": len(ssh_sources),
+                "session_activity": len(ssh_activities),
+                "activity_types": dict(Counter(item['activity_label'] for item in ssh_activities)),
                 "correlation_excluded": ssh_excluded,
                 "rejected_reasons": dict(ssh_rejected),
                 "top_failure_ips": ssh_sources.most_common(10), "top_accounts": ssh_accounts.most_common(10),
@@ -556,6 +582,9 @@ def render_report(result: dict) -> str:
     lines.extend(["", "## SSH 证据", "", "失败次数最高的来源：", "", "| 来源 IP | 失败次数 |", "| --- | ---: |"])
     lines.extend(f"| `{_md(ip)}` | {count} |" for ip, count in ssh["top_failure_ips"])
     lines.append(f"\n其中 root 账户密码失败 {ssh['root_failed']} 次。")
+    if ssh.get('session_activity'):
+        lines.append(f"\n另有 {ssh['session_activity']} 条 SSH 会话活动，仅作上下文，不计为认证成功/失败或授权证明：" +
+                     '、'.join(f'{label} {count} 条' for label, count in ssh['activity_types'].items()))
     if ssh["accepted_examples"]:
         lines.extend(["", "成功认证记录（最多 10 条）：", "", "| 时间 | 来源 IP | 账户 | 方式 | 原文位置 |", "| --- | --- | --- | --- | --- |"])
         for item in ssh["accepted_examples"]:
@@ -629,6 +658,7 @@ def render_console(result: dict) -> str:
         *coverage_lines(result),
         f"结论：{result['assessment']}；未识别、缺失和跳过内容均不在判断范围内。",
         f"SSH：{ssh['failed']} 次密码失败，{ssh['accepted']} 次成功认证，失败来源 {ssh['distinct_failure_ips']} 个 IP。",
+        f"SSH 会话活动：{ssh.get('session_activity', 0)} 条，仅作上下文，不代表已验证授权或安全。",
         f"其中 root 密码登录成功 {ssh['root_password_success']} 次，来自 {len(ssh['root_password_sources'])} 个 IP，需核对授权。",
         f"Nginx：{nginx['requests']} 条请求，{len(nginx['five_xx'])} 条 5xx，其中 {matched} 条唯一匹配应用异常，"
         f"{sum(bool(item['app_candidates']) and not item['app_exception'] for item in nginx['five_xx'])} 条仅有待核实候选。",
